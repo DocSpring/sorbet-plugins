@@ -30,14 +30,23 @@ used_types = spec_files.flat_map { |path| File.read(path).scan(/\btype: :(\w+)/)
 types = ((defined?(RSpec::Rails::DIRECTORY_MAPPINGS) ? RSpec::Rails::DIRECTORY_MAPPINGS.keys : []) + [:feature] +
          filter_types + used_types).map(&:to_sym).uniq.sort
 
+PROJECT_ROOT = "#{File.expand_path(defined?(Rails) ? Rails.root.to_s : Dir.pwd)}/"
+# Gems can live inside the project (vendor/bundle on CI, vendored gems), so a file under the root isn't necessarily
+# the app's own.
+GEM_DIRS = [*Gem.path, Bundler.bundle_path.to_s, "#{PROJECT_ROOT}vendor"].map { |dir| "#{File.expand_path(dir)}/" }
+
+def app_file?(path)
+  path = File.expand_path(path)
+  path.start_with?(PROJECT_ROOT) && GEM_DIRS.none? { |dir| path.start_with?(dir) }
+end
+
 # Modules the app's own code mixed into Object (`include Helpers` at the top level of a support file): every example
 # has them.
-project_root = File.expand_path(defined?(Rails) ? Rails.root.to_s : Dir.pwd)
 object_mixins = Object.ancestors.select do |mod|
   next false if mod.is_a?(Class) || mod.name.nil?
 
   location = Object.const_source_location(mod.name)&.first
-  location && File.expand_path(location).start_with?("#{project_root}/")
+  location && app_file?(location)
 end
 
 def define_group(metadata)

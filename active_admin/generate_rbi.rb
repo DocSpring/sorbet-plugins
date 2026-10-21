@@ -21,6 +21,14 @@ def camelize(name) = name.to_s.split(/[^A-Za-z0-9]+/).reject(&:empty?).map { |pa
 
 SIMPLE_METHOD = /\A[a-z_][a-zA-Z0-9_]*[?!]?\z/
 PROJECT_ROOT = "#{File.expand_path(Rails.root.to_s)}/"
+# Gems can live inside the project (vendor/bundle on CI, vendored gems), so a file under the root isn't necessarily
+# the app's own.
+GEM_DIRS = [*Gem.path, Bundler.bundle_path.to_s, "#{PROJECT_ROOT}vendor"].map { |dir| "#{File.expand_path(dir)}/" }
+
+def app_file?(path)
+  path = File.expand_path(path)
+  path.start_with?(PROJECT_ROOT) && GEM_DIRS.none? { |dir| path.start_with?(dir) }
+end
 
 def stub(name, indent) = "#{indent}def #{name}(*args, **kwargs, &blk); end"
 
@@ -28,7 +36,7 @@ def nameable?(mod) = mod.name && !mod.name.start_with?('#<') && Object.const_get
 
 def project_method?(mod, name)
   location = mod.instance_method(name).source_location&.first
-  location && File.expand_path(location).start_with?(PROJECT_ROOT)
+  location && app_file?(location)
 end
 
 # Methods the app defines on a class at runtime (`ResourceController.class_eval do def self.x`): Sorbet can't see
