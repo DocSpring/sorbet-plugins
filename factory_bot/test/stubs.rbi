@@ -38,8 +38,66 @@ module FactoryBotTypes
       sig { returns(Symbol) }
       def self.admin; end
     end
+
+    module Definition
+      sig { params(args: T.untyped, kwargs: T.untyped, block: T.nilable(T.proc.bind(Evaluator).returns(T.untyped))).void }
+      def name(*args, **kwargs, &block); end
+
+      sig { params(args: T.untyped, kwargs: T.untyped, block: T.nilable(T.proc.bind(Evaluator).returns(T.untyped))).void }
+      def nickname(*args, **kwargs, &block); end
+
+      sig { params(args: T.untyped, kwargs: T.untyped, block: T.nilable(T.proc.bind(Evaluator).returns(T.untyped))).void }
+      def admin(*args, **kwargs, &block); end
+
+      sig { params(name: Symbol, block: T.proc.bind(Definition).void).void }
+      def trait(name, &block); end
+
+      sig { params(block: T.proc.bind(Definition).void).void }
+      def transient(&block); end
+
+      sig do
+        params(
+          names: Symbol,
+          block: T.proc.bind(::FactoryBot::SyntaxRunner).params(record: Model, evaluator: Evaluator).void
+        ).void
+      end
+      def after(*names, &block); end
+
+      sig { params(name: Symbol, options: T.untyped, block: T.nilable(T.proc.void)).void }
+      def factory(name, options = {}, &block); end
+    end
+
+    class Evaluator < ::User
+      sig { returns(T.untyped) }
+      def nickname; end
+    end
+  end
+end
+
+module FactoryBotTypes
+  module AdminUser
+    module Definition
+      sig { params(args: T.untyped, kwargs: T.untyped, block: T.nilable(T.proc.bind(Evaluator).returns(T.untyped))).void }
+      def admin(*args, **kwargs, &block); end
+    end
+
+    class Evaluator < ::User; end
   end
 end
 
 module FactoryBot
+  def self.define(&blk); end
+
+  module Syntax
+    module Default
+      class DSL
+        def factory(name, options = {}, &blk); end
+        def sequence(name, *args, &blk); end
+      end
+    end
+  end
+
+  class SyntaxRunner
+    def create(*args, **kwargs, &blk); end
+  end
 end

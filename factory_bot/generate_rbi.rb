@@ -1,7 +1,10 @@
 # frozen_string_literal: true
 
 # Writes the RBI that the factory_bot Sorbet plugin's rewritten calls refer to: a module per factory under
-# FactoryBotTypes, with typed create/build/... methods, its traits, and a `Model` type alias.
+# FactoryBotTypes, with typed create/build/... methods, its traits, and a `Model` type alias. For the factory
+# definitions, each module also gets a `Definition` module (what a `factory` block runs in: FactoryBot's DSL and a
+# method per attribute, transient attribute and trait) and an `Evaluator` class (what attribute blocks run in: the
+# declared attributes, `association`, and the record's other methods).
 #
 # Run it inside the app, with the factories loaded:
 #
@@ -31,6 +34,27 @@ end
 
 def traits_for(factory)
   factory_chain(factory).flat_map { |f| f.definition.defined_traits.map { |trait| trait.name.to_s } }.uniq.sort
+end
+
+# FactoryBot::DefinitionProxy's own methods. Any other call in a factory block declares an attribute.
+DSL_METHODS = %w[
+  add_attribute after association before callback factory initialize_with sequence skip_create to_create trait
+  traits_for_enum transient
+].freeze
+IDENTIFIER = /\A[a-z_][a-zA-Z0-9_]*\z/
+
+# The attributes the factory and its traits declare, and whether each is transient
+def declared_attributes(factory)
+  declared = {}
+  factory_chain(factory).each do |f|
+    f.send(:attributes).each { |attribute| declared[attribute.name.to_s] ||= attribute.ignored }
+    f.definition.defined_traits.each do |trait|
+      trait.definition.declarations.each do |declaration|
+        declared[declaration.name.to_s] ||= declaration.instance_variable_get(:@ignore) || false
+      end
+    end
+  end
+  declared
 end
 
 def keyword_names(factory, model)
@@ -84,6 +108,59 @@ FactoryBot.factories.sort_by { |f| f.name.to_s }.each do |factory|
     lines << '      sig { returns(Symbol) }'
     lines << "      def self.#{trait}; end"
   end
+  lines << '    end'
+  lines << ''
+
+  declared = declared_attributes(factory)
+  definition_names = (keywords + declared.keys + traits_for(factory)).uniq.sort
+    .select { |name| name.match?(IDENTIFIER) && !DSL_METHODS.include?(name) && !RUBY_KEYWORDS.include?(name) }
+  evaluator = "::FactoryBotTypes::#{module_name}::Evaluator"
+  definition = "::FactoryBotTypes::#{module_name}::Definition"
+  attribute_block = "T.nilable(T.proc.bind(#{evaluator}).returns(T.untyped))"
+  callback_block = "T.proc.bind(::FactoryBot::SyntaxRunner).params(record: Model, evaluator: #{evaluator}).void"
+  lines << '    module Definition'
+  [
+    ["params(name: T.any(Symbol, String), block: T.proc.bind(#{evaluator}).returns(T.untyped)).void", 'add_attribute(name, &block)'],
+    ['params(name: Symbol, options: T.untyped).void', 'association(name, *options)'],
+    ["params(name: Symbol, args: T.untyped, block: T.nilable(T.proc.bind(#{evaluator}).params(value: T.untyped).returns(T.untyped))).void",
+     'sequence(name, *args, &block)'],
+    ["params(name: Symbol, block: T.proc.bind(#{definition}).void).void", 'trait(name, &block)'],
+    ['params(attribute_name: Symbol, values: T.untyped).void', 'traits_for_enum(attribute_name, values = nil)'],
+    ["params(block: T.proc.bind(#{definition}).void).void", 'transient(&block)'],
+    ['params(name: Symbol, options: T.untyped, block: T.nilable(T.proc.void)).void', 'factory(name, options = {}, &block)'],
+    ["params(names: Symbol, block: #{callback_block}).void", 'after(*names, &block)'],
+    ["params(names: Symbol, block: #{callback_block}).void", 'before(*names, &block)'],
+    ["params(names: Symbol, block: #{callback_block}).void", 'callback(*names, &block)'],
+    ["params(block: T.proc.bind(#{evaluator}).returns(T.untyped)).void", 'initialize_with(&block)'],
+    ["params(block: T.proc.params(instance: Model, evaluator: #{evaluator}).void).void", 'to_create(&block)'],
+    ['void', 'skip_create'],
+  ].each do |sig, method|
+    lines << "      sig { #{sig} }"
+    lines << "      def #{method}; end"
+    lines << ''
+  end
+  definition_names.each do |name|
+    lines << "      sig { params(args: T.untyped, kwargs: T.untyped, block: #{attribute_block}).void }"
+    lines << "      def #{name}(*args, **kwargs, &block); end"
+    lines << ''
+  end
+  lines.pop
+  lines << '    end'
+  lines << ''
+  # Evaluator only exists for Sorbet. FactoryBot's evaluator answers each declared attribute itself, with the
+  # factory's value or the caller's override (so untyped), and passes other calls to the record being built.
+  lines << "    class Evaluator < ::#{model.name}"
+  readers = declared.keys.select { |name| name.match?(IDENTIFIER) && !RUBY_KEYWORDS.include?(name) }
+  readers.sort.each do |name|
+    lines << '      sig { returns(T.untyped) }'
+    lines << "      def #{name}; end"
+    lines << ''
+  end
+  lines << '      sig { params(factory_name: Symbol, traits_and_overrides: T.untyped).returns(T.untyped) }'
+  lines << '      def association(factory_name, *traits_and_overrides); end'
+  lines << ''
+  lines << '      sig { returns(Model) }'
+  lines << '      def instance; end'
   lines << '    end'
   lines << '  end'
   lines << ''

@@ -31,6 +31,12 @@ namespace {
 // so an unknown factory, trait or attribute is an error, and the result is typed. It also gives `let`, `let!` and
 // `subject` blocks that only build a factory a `sig`, so the let's method is typed too.
 //
+// Factory definitions are checked too. `FactoryBot.define` runs its block on FactoryBot's DSL object, and each
+// `factory :user do` block on a definition proxy, which treats any call it doesn't define as an attribute, a trait or
+// an implicit association. The generator writes a `FactoryBotTypes::User::Definition` module with FactoryBot's DSL and
+// a method per attribute, transient attribute and trait, whose signatures bind attribute blocks to the factory's
+// evaluator and type callback blocks' params. This plugin binds each factory block's `self` to it.
+//
 // The rewrite only changes what Sorbet checks; the code still calls FactoryBot at runtime.
 enum class Shape { Single, List, Pair, Attributes };
 
@@ -42,9 +48,11 @@ struct Method {
 class Names {
 public:
     vector<Method> methods;
-    core::NameRef factoryBot;
+    core::NameRef factoryBot, define, factory;
 
-    explicit Names(const core::GlobalState &gs) : factoryBot(gs.lookupNameConstant("FactoryBot")) {
+    explicit Names(const core::GlobalState &gs)
+        : factoryBot(gs.lookupNameConstant("FactoryBot")), define(gs.lookupNameUTF8("define")),
+          factory(gs.lookupNameUTF8("factory")) {
         add(gs, "create", Shape::Single);
         add(gs, "build", Shape::Single);
         add(gs, "build_stubbed", Shape::Single);
@@ -113,6 +121,56 @@ optional<string> rewrittenFactory(core::MutableContext ctx, const ast::Expressio
         return nullopt;
     }
     return string(factory->cnst.shortName(ctx));
+}
+
+void prependStatements(ast::Block &block, ast::InsSeq::STATS_store stats) {
+    if (auto insSeq = ast::cast_tree<ast::InsSeq>(block.body)) {
+        for (auto &stat : insSeq->stats) {
+            stats.emplace_back(move(stat));
+        }
+        insSeq->stats = move(stats);
+    } else {
+        auto loc = block.body.loc();
+        block.body = ast::MK::InsSeq(loc, move(stats), move(block.body));
+    }
+}
+
+// `T.bind(self, Type)`, as the cast node Sorbet's TypeAssertion rewriter makes of it (that rewriter has already run on
+// the class body's sends).
+void bindSelf(core::MutableContext ctx, ast::Block &block, core::LocOffsets loc, ast::ExpressionPtr type) {
+    loc = loc.copyWithZeroLength();
+    ast::InsSeq::STATS_store stats;
+    stats.emplace_back(ast::make_expression<ast::Cast>(loc, core::Types::todo(), ast::MK::Self(loc),
+                                                       core::Names::syntheticBind(), move(type)));
+    prependStatements(block, move(stats));
+}
+
+// Binds each `factory :name do` block among `body`'s statements to its Definition module, and the factories nested in
+// them. A block that takes the proxy as a param (`factory :user do |f|`, the old syntax) is left alone.
+void bindFactories(core::MutableContext ctx, const Names &names, ast::ExpressionPtr &body) {
+    auto bindFactory = [&](ast::ExpressionPtr &stat) {
+        auto send = ast::cast_tree<ast::Send>(stat);
+        if (send == nullptr || send->fun != names.factory || !send->recv.isSelfReference() || !send->hasBlock() ||
+            send->numPosArgs() == 0 || !send->block()->params.empty()) {
+            return;
+        }
+        auto name = ast::cast_tree<ast::Literal>(send->getPosArg(0));
+        if (name == nullptr || !name->isSymbol()) {
+            return;
+        }
+        auto &block = *send->block();
+        bindFactories(ctx, names, block.body);
+        auto factory = camelize(name->asSymbol().shortName(ctx));
+        bindSelf(ctx, block, name->loc, rootConstant(ctx, name->loc, {"FactoryBotTypes", factory, "Definition"}));
+    };
+    if (auto insSeq = ast::cast_tree<ast::InsSeq>(body)) {
+        for (auto &stat : insSeq->stats) {
+            bindFactory(stat);
+        }
+        bindFactory(insSeq->expr);
+    } else {
+        bindFactory(body);
+    }
 }
 
 class Rewriter {
@@ -241,6 +299,18 @@ public:
             return;
         }
         Names names(ctx.state);
+        if (names.define.exists() && names.factory.exists()) {
+            for (auto &stat : classDef.rhs) {
+                auto send = ast::cast_tree<ast::Send>(stat);
+                if (send != nullptr && send->fun == names.define && isFactoryBotConstant(names, send->recv) &&
+                    send->hasBlock()) {
+                    auto &block = *send->block();
+                    bindFactories(ctx, names, block.body);
+                    bindSelf(ctx, block, block.loc,
+                             rootConstant(ctx, block.loc, {"FactoryBot", "Syntax", "Default", "DSL"}));
+                }
+            }
+        }
         if (names.methods.empty()) {
             return;
         }
