@@ -112,11 +112,13 @@ def route_helper_lines(mods)
   ['      include GeneratedUrlHelpersModule', '      include GeneratedPathHelpersModule']
 end
 
-# RSpec's be_<predicate> and have_<x> matchers come from RSpec::Matchers#method_missing.
+# RSpec's be_<predicate> and have_<x> matchers come from RSpec::Matchers#method_missing. A name some spec types
+# define for real (Capybara's `have_css` in feature specs) is still dynamic in the others (request specs); the
+# plugin includes the type's module after Everywhere, so the real definition wins where there is one.
 dynamic_matchers = spec_files.flat_map do |path|
   File.read(path).scan(/(?<![\w.])((?:be|have)_[a-z0-9_]+)\b/).flatten
 end.uniq.sort.reject do |name|
-  [untyped, *by_type.values].any? { |group| group.method_defined?(name) || group.private_method_defined?(name) }
+  untyped.method_defined?(name) || untyped.private_method_defined?(name)
 end
 
 lines = []
