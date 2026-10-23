@@ -26,6 +26,7 @@ module ActiveAdmin
     def csv(options = {}, &blk); end
     def member_action(name, options = {}, &blk); end
     def collection_action(name, options = {}, &blk); end
+    def batch_action(name, options = {}, &blk); end
     def before_create(&blk); end
   end
 

@@ -11,7 +11,7 @@ understands, before Sorbet's own rewriters run. A plugin sees one file at a time
 | `capybara` | `feature`/`scenario`/`background`/`given` as `describe`/`it`/`before`/`let`, with `type: :feature`. | |
 | `rswag` | `path`, HTTP verbs and `response` as groups and `run_test!` as an example, inside spec groups. | |
 | `factory_bot` | `create(:user, :admin, name: 'x')` as `FactoryBotTypes::User.create(...)`, so factory, trait and attribute names are checked and the result is typed; `let(:user) { create(:user) }` gets a sig. In factory definitions, binds each `factory :user do` block to `FactoryBotTypes::User::Definition`, so attribute and trait names are checked, attribute blocks see the record's methods and the transient attributes, and callbacks get a typed record. `typed: true` files only. | `factory_bot/generate_rbi.rb` |
-| `active_admin` | Binds each block of `ActiveAdmin.register` to what runs it: the registration DSL, a view with the controller's helpers, or the controller. Moves `controller do` and action blocks into a stand-in controller class, and types `resource` and the resource's block params. | `active_admin/generate_rbi.rb` |
+| `active_admin` | Binds each block of `ActiveAdmin.register` to what runs it: the registration DSL, a view with the controller's helpers, or the controller. Moves `controller do` and action blocks into a stand-in controller class (action blocks as methods with an implied `sig { void }`, so they pass at `typed: strict`), and types `resource` and the resource's block params. | `active_admin/generate_rbi.rb` |
 
 ## Using them
 

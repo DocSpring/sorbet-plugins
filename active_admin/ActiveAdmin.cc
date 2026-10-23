@@ -6,7 +6,8 @@
 // The plugin:
 // - binds the registration block's self to ActiveAdmin::ResourceDSL (PageDSL for `register_page`);
 // - moves `controller do` bodies, and the blocks of `member_action`, `collection_action`, `page_action` and
-//   `batch_action` (as methods), into a stand-in controller class, ActiveAdminTypes::<Resources|Pages>::<Name>::Controller;
+//   `batch_action` (as methods with an implied `sig { void }`), into a stand-in controller class,
+//   ActiveAdminTypes::<Resources|Pages>::<Name>::Controller;
 // - binds view blocks' self to ActiveAdminTypes::<Resources|Pages>::<Name>::View;
 // - types the resource block params (`show do |user|`, `column(:x) { |user| }` in an index or attributes table).
 //
@@ -352,6 +353,10 @@ ast::ExpressionPtr rewriteRegistration(core::MutableContext ctx, const Names &na
             typeParams(innerBlock, ast::ExpressionPtr());
             auto methodName = inner->fun == names.batchAction ? "batch_action_" + *name : *name;
             auto loc = inner->loc;
+            // Nothing uses the block's value (Rails ignores what an action returns), and a `sig` can't go on a block:
+            // an implied `sig { void }`, as Sorbet's Minitest rewriter gives test methods, so actions pass at
+            // `typed: strict`.
+            controllerBody.emplace_back(ast::MK::SigVoid(loc, {}));
             controllerBody.emplace_back(
                 ast::MK::Method0(loc, inner->funLoc, ctx.state.enterNameUTF8(methodName), move(innerBlock.body)));
             inner->setBlock(nullptr, ast::Send::BlockType::None);
