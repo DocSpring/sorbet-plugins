@@ -10,7 +10,7 @@ namespace sorbet::plugins::rspec {
 
 namespace {
 
-// Helps Sorbet's RSpec rewriter (--enable-experimental-rspec) with three things it can't do alone:
+// Helps Sorbet's RSpec rewriter (--enable-experimental-rspec) with four things it can't do alone:
 //
 // 1. What `config.include`/`config.extend` add to a group. Each top-level group (and any group with explicit
 //    `type:` metadata) gets
@@ -28,6 +28,9 @@ namespace {
 //
 // 3. Example block parameters: Sorbet drops `|example|` from `it`/`before`/`after` blocks. Keep it as a local typed
 //    RSpec::Core::Example.
+//
+// 4. test-prof's `let_it_be(:name, refind: true) { ... }` and `before_all { ... }`, which Sorbet's rewriter doesn't
+//    know: checked as `let(:name) { ... }` and `before { ... }`.
 
 // rspec-rails' infer_spec_type_from_file_location! (RSpec::Rails::DIRECTORY_MAPPINGS).
 struct DirectoryType {
@@ -696,13 +699,17 @@ bool isSharedGroupName(core::NameRef fun) {
 class Walker {
     core::NameRef typeName;
     core::NameRef aroundName;
+    core::NameRef letItBeName;
+    core::NameRef beforeAllName;
     vector<Scope> scopes;
     // The spec type in effect in each scope: the nearest `type:`, else the one rspec-rails infers from the path.
     vector<optional<string>> types;
 
 public:
-    Walker(core::NameRef typeName, core::NameRef aroundName, optional<string> pathType)
-        : typeName(typeName), aroundName(aroundName), scopes{Scope::Group}, types{move(pathType)} {}
+    Walker(core::NameRef typeName, core::NameRef aroundName, core::NameRef letItBeName, core::NameRef beforeAllName,
+           optional<string> pathType)
+        : typeName(typeName), aroundName(aroundName), letItBeName(letItBeName), beforeAllName(beforeAllName),
+          scopes{Scope::Group}, types{move(pathType)} {}
 
     void preTransformSend(core::MutableContext ctx, ast::ExpressionPtr &tree) {
         auto &send = ast::cast_tree_nonnull<ast::Send>(tree);
@@ -739,6 +746,19 @@ public:
                 keepExampleParam(ctx, *send.block(), {"RSpec", "Core", "Example", "Procsy"});
                 send.fun = core::Names::before();
                 if (send.numPosArgs() > 0) {
+                    tree = withoutMetadata(send, 0);
+                }
+            } else if (send.recv.isSelfReference() && send.fun == letItBeName && letItBeName.exists()) {
+                // test-prof's `let_it_be(:name, refind: true) { ... }` builds its value once for the group, and each
+                // example reads it like a let. Check it as `let(:name)`, which takes no options.
+                send.fun = core::Names::let();
+                if (send.numPosArgs() > 1 || send.numKwArgs() > 0 || send.kwSplat() != nullptr) {
+                    tree = withoutMetadata(send, 1);
+                }
+            } else if (send.recv.isSelfReference() && send.fun == beforeAllName && beforeAllName.exists()) {
+                // test-prof's `before_all` runs once for the group, in an example's context. Check it as a before hook.
+                send.fun = core::Names::before();
+                if (send.numPosArgs() > 0 || send.numKwArgs() > 0) {
                     tree = withoutMetadata(send, 0);
                 }
             }
@@ -778,6 +798,8 @@ public:
         }
         auto typeName = ctx.state.lookupNameUTF8("type");
         auto aroundName = ctx.state.lookupNameUTF8("around");
+        auto letItBeName = ctx.state.lookupNameUTF8("let_it_be");
+        auto beforeAllName = ctx.state.lookupNameUTF8("before_all");
         optional<string> pathType;
         if (auto inferred = typeFromPath(ctx.file.data(ctx).path())) {
             pathType = string(*inferred);
@@ -789,7 +811,7 @@ public:
                 !(isRSpecConstant(send->recv) || send->recv.isSelfReference())) {
                 continue;
             }
-            Walker walker(typeName, aroundName, pathType);
+            Walker walker(typeName, aroundName, letItBeName, beforeAllName, pathType);
             ast::TreeWalk::apply(ctx, walker, stat);
         }
     }
