@@ -1,0 +1,15 @@
+<%# A literal render of a partial calls the method the context declares with the partial's locals. %>
+<%= render 'templates/card', template: @template %>
+<%= render 'card', template: @template, title: 'Hi', count: 2 %>
+<%= render('templates/card', { template: @template }) %>
+<%= render partial: 'templates/card', locals: { template: @template, count: 3 } %>
+<%= render partial: 'templates/card' %> <%# error: Missing required keyword argument `template` %>
+<%= render 'templates/card', template: @template, count: 'x' %> <%# error: Expected `Integer` but found `String("x")` for argument `count` %>
+<%= render 'templates/card', template: @template, size: 1 %> <%# error: Unrecognized keyword argument `size` %>
+<%= render 'templates/crad', template: @template %> <%# error: Method `__partial__templates__crad` does not exist %>
+<%# Others stay renders: a name in a variable, a collection, other options, a block. %>
+<% name = 'templates/card' %>
+<%= render name, template: @template %>
+<%= render partial: 'templates/card', collection: [@template], as: :template %>
+<%= render 'templates/card', template: @template do %>x<% end %>
+<%= render 'templates/card', **{ template: @template } %>

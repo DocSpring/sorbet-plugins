@@ -1,0 +1,4 @@
+<%#   locals: (template:,
+              note: nil, **) -%>
+<%# sig { params(template: Template, note: T.nilable(String), extra: Integer) } %> <%# error: Unknown parameter name `extra` %>
+<p><%= template.name %> <%= note.upcase %></p> <%# error: Method `upcase` does not exist on `NilClass` component of `T.nilable(String)` %>

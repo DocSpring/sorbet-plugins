@@ -1,0 +1,8 @@
+<%# locals: (template:, title: 'Card', count: 1) -%>
+<%# sig { params(template: Template, count: Integer) } -%>
+<%# A partial's locals are its render method's parameters: typed by the sig comment, `T.untyped` without one. %>
+<h2><%= title.anything %></h2>
+<p><%= template.name %>: <%= count + 1 %></p>
+<%= template.nope %> <%# error: Method `nope` does not exist on `Template` %>
+<%= count + 'x' %> <%# error: Expected `Integer` but found `String("x")` %>
+<%= missing %> <%# error: Method `missing` does not exist on `SorbetViews::Templates::CardPartialHtml` %>

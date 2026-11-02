@@ -10,6 +10,9 @@ end
 class ViewBase
   sig { params(text: String, url: String).returns(String) }
   def link_to(text, url); end
+
+  sig { params(args: T.untyped, kwargs: T.untyped, blk: T.untyped).returns(T.untyped) }
+  def render(*args, **kwargs, &blk); end
 end
 
 module Ds
@@ -40,6 +43,23 @@ module SorbetViews
       end
 
       class LooseHtml < ViewBase; end
+
+      class CardPartialHtml < ViewBase; end
+      class NoLocalsPartialHtml < ViewBase; end
+      class AnyLocalsPartialHtml < ViewBase; end
+
+      # What the generator declares for each partial a view renders by name: the partial's locals.
+      class CardsHtml < ViewBase
+        def initialize
+          @template = T.let(T.unsafe(nil), Template)
+        end
+
+        sig { params(template: Template, title: T.untyped, count: Integer).returns(T.untyped) }
+        def __partial__templates__card(template:, title: T.unsafe(nil), count: T.unsafe(nil)); end
+
+        sig { params(template: Template, title: T.untyped, count: Integer).returns(T.untyped) }
+        def __partial__card(template:, title: T.unsafe(nil), count: T.unsafe(nil)); end
+      end
 
       class AssignsHtml < ViewBase
         def initialize
