@@ -54,7 +54,8 @@ optional<pair<string_view, bool>> templatePath(string_view path) {
     return nullopt;
 }
 
-// Must match `camelize` in generate_rbi.rb: split on anything but letters and digits, upcase each part's first letter.
+// Must match `camelize` in generator/names.rb: split on anything but letters and digits, upcase each part's first
+// letter.
 string camelize(string_view name) {
     string out;
     bool startOfPart = true;
@@ -69,7 +70,7 @@ string camelize(string_view name) {
     return out;
 }
 
-// Must match `class_path` in generate_rbi.rb. The constant path of the class a template's code runs in, without
+// Must match `class_parts` in generator/names.rb. The constant path of the class a template's code runs in, without
 // `SorbetViews`: a part per directory, then the file's name, with `Partial` after a partial's name and its formats
 // after that (`templates/_row.html.erb` => Templates, RowPartialHtml). A part that would start with a digit gets a
 // leading `N` (`errors/404.html.erb` => Errors, N404Html).

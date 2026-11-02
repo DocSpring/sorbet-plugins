@@ -64,8 +64,8 @@ module ErbViews
 
       body = extras.dup
       if context
-        ivars = own_ivars(context, file).sort.map do |name, ivar|
-          "    #{name} = T.let(T.unsafe(nil), #{@types.ivar_type(logical, name, ivar)})"
+        ivars = ivar_names(context, file).map do |name|
+          "    #{name} = T.let(T.unsafe(nil), #{@types.ivar_type(logical, file, name)})"
         end
         body << "  sig { void }\n  def initialize\n#{ivars.join("\n")}\n  end" unless ivars.empty?
         body << "  sig { returns(::User) }\n  def current_user; end" if context.authenticated?
@@ -84,14 +84,8 @@ module ErbViews
     end
 
     # The ivars that reach a template, and the ones it assigns itself (for its layout or partials).
-    def own_ivars(context, file)
-      ivars = context.ivars.reject { |name, _| name.start_with?('!') }
-      @graph.template_facts(file).writes.each do |write|
-        ivar = ivars[write.name]
-        ivar = ivars[write.name] = RenderGraph::Ivar.new(writes: ivar ? ivar.writes.dup : [], definite: ivar&.definite || false)
-        ivar.writes << RenderGraph::Write.new(file:, node: write.node, value: write.value)
-      end
-      ivars
+    def ivar_names(context, file)
+      (context.ivars.keys.reject { |name| name.start_with?('!') } + @graph.template_facts(file).writes.map(&:name)).uniq.sort
     end
 
     def logical_name(relative)

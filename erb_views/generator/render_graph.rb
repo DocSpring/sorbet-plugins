@@ -17,10 +17,35 @@ module ErbViews
     # A literal render a template makes of a partial, with the locals it passes (name => value node, or nil when
     # the value isn't in the call, as with `collection:`'s local).
     PartialCall = Struct.new(:file, :node, :partial, :locals, keyword_init: true)
+    # A local whose value isn't a node in the call: an element of `collection:` (its node), or a fixed type.
+    Element = Struct.new(:node)
+    Known = Struct.new(:type)
     # Not an ivar: an env entry that's definite when `authenticate_user!` ran.
     AUTHENTICATED = '!authenticated'
-    # What reaches one template (a logical name: all its formats).
-    Context = Struct.new(:renderers, :ivars, :calls, keyword_init: true) do
+    # Where a template's ivars pass to the next one: a render call (`:wrap`, its node), the end of an action's method
+    # (`:after`, the def or block) for its default template, or the end of a template (`:end`) for its layout. The
+    # type probe reveals each ivar there, where Sorbet's flow typing knows the most (after `return unless @record`).
+    # `file` is relative to the app, or absolute in a gem. A render in a method the action calls (`render_page(:show)`)
+    # has the call as its `outer` handoff: there Sorbet knows the action's ivars (`return unless @record` before the
+    # call), and at the render only those the method assigns (`inner`).
+    #
+    # A handoff in an action has its `callbacks`: [the end of a callback's method (an `:after` Handoff), the ivars it
+    # reads or assigns], in the order they run, and `own_writes`, the ivars the action assigns. Sorbet types an ivar
+    # in the action as the class declares it, so one only a callback sets (`@pack`, nil when `prepare_purchase`
+    # redirects) has the type it has at the end of the last callback that uses it.
+    #
+    # An `:after` handoff's `exits` are the method's `return`s that don't end the response: its default template
+    # renders there too, or a callback's chain carries on from there.
+    Handoff = Struct.new(:file, :node, :kind, :outer, :inner, :callbacks, :own_writes, :exits) do
+      def key = [file, kind, node && [node.location.start_offset, node.location.end_offset]]
+      def origin_key = [key, outer&.key, callbacks&.map { |handoff, _| handoff.key }]
+    end
+    # One way into a template: the renderer, the ivars on the way, the layouts it renders in (nil for a partial) and
+    # where it came from.
+    Visit = Struct.new(:logical, :renderer, :env, :layouts, :origin, keyword_init: true)
+    # What reaches one template (a logical name: all its formats). `origins`: handoff key => [Handoff, the ivars
+    # that arrive from there].
+    Context = Struct.new(:renderers, :ivars, :calls, :origins, keyword_init: true) do
       # Whether every render of the template comes after an `authenticate_user!` that always runs.
       def authenticated? = ivars[AUTHENTICATED]&.definite || false
     end
@@ -28,14 +53,22 @@ module ErbViews
     # Render options that don't render a template.
     NOT_TEMPLATES = %i[plain json html body inline file js xml nothing text].freeze
 
-    attr_reader :app, :contexts, :dynamic_renders
+    # For the type probe: `renderer_ivars`, renderer name => ivar => the writes any of its actions makes,
+    # `callback_envs`, renderer name => the ivars after each action's callbacks, and `ending_calls`, [file, offset] =>
+    # a call in an action's or callback's body that ends the response (`redirect_back_with(...) unless @pack`). The
+    # probe puts `return` before each one, so Sorbet's flow typing after it knows it didn't run.
+    attr_reader :app, :contexts, :dynamic_renders, :renderer_ivars, :callback_envs, :ending_calls
 
     def initialize(app)
       @app = app
-      @contexts = Hash.new { |hash, logical| hash[logical] = Context.new(renderers: Set.new, ivars: {}, calls: []) }
+      @contexts = Hash.new { |hash, logical| hash[logical] = Context.new(renderers: Set.new, ivars: {}, calls: [], origins: {}) }
       @template_facts = {}
       @method_cache = {}
+      @outcomes = {}
       @dynamic_renders = []
+      @renderer_ivars = Hash.new { |hash, name| hash[name] = Hash.new { |ivars, ivar| ivars[ivar] = [] } }
+      @callback_envs = Hash.new { |hash, name| hash[name] = [] }
+      @ending_calls = {}
       build
     end
 
@@ -64,19 +97,33 @@ module ErbViews
       # Propagate down the templates until nothing changes: each visit merges into its template's context, and a
       # context that changed passes its ivars on to its partials and layouts.
       until queue.empty?
-        logical, renderer, env, layouts = queue.shift
-        context = @contexts[logical]
+        visit = queue.shift
+        renderer = visit.renderer
+        context = @contexts[visit.logical]
         new_renderer = !context.renderers.add?(renderer.name).nil?
-        merged = merge_into(context.ivars, env, first: context.renderers.size == 1 && new_renderer)
+        merged = merge_into(context.ivars, visit.env, first: context.renderers.size == 1 && new_renderer)
+        record_origin(context, visit)
         changed = new_renderer || merged
-        next unless changed || layouts
+        next unless changed || visit.layouts
 
-        app.files(logical).each do |file|
+        app.files(visit.logical).each do |file|
           facts = template_facts(file)
           below = writes_env(context.ivars, facts)
           queue.concat(view_visits(renderer, facts, below))
-          (layouts || []).each { |layout| queue << [layout, renderer, below, nil] }
+          (visit.layouts || []).each do |layout|
+            queue << Visit.new(logical: layout, renderer:, env: below, layouts: nil, origin: Handoff.new(file, nil, :end))
+          end
         end
+      end
+    end
+
+    def record_origin(context, visit)
+      key = visit.origin ? visit.origin.origin_key : [:unknown, visit.renderer.name]
+      entry = context.origins[key]
+      if entry
+        merge_into(entry[1], visit.env, first: false)
+      else
+        context.origins[key] = [visit.origin, {}].tap { |(_, env)| merge_into(env, visit.env, first: true) }
       end
     end
 
@@ -85,26 +132,105 @@ module ErbViews
     def action_visits(renderer, action)
       env = {}
       visits = []
-      app.callbacks(renderer, action).each do |callback|
+      ends = []
+      callbacks = app.callbacks(renderer, action)
+      callbacks.each do |callback|
         env = env.merge(AUTHENTICATED => Ivar.new(writes: [], definite: true)) if callback.method == 'authenticate_user!' && callback.always
         facts = expand(renderer, callback.facts, Set.new)
         facts = conditional(facts) unless callback.always
         env = writes_env(env, facts)
         visits.concat(render_visits(renderer, facts.renders, env, default: action))
         # A callback that always renders or redirects stops the chain.
-        return visits if responds?(facts)
+        return record_env(renderer, env, visits) if responds?(facts)
+
+        callback_end = callback_end(renderer, callback, facts)
+        ends << callback_end if callback_end
       end
+      @callback_envs[renderer.name] << env
       facts = collect(renderer, action.to_sym, Set.new)
       env = writes_env(env, facts)
-      visits.concat(render_visits(renderer, facts.renders, env, default: action))
-      unless responds?(facts)
+      own = render_visits(renderer, facts.renders, env, default: action)
+      unless responds?(facts) || always_ends?(renderer, action.to_sym)
         logical = app.resolve(action, renderer.prefixes, partial: false)
-        visits << [logical, renderer, env, renderer.layouts] if logical
+        own << Visit.new(logical:, renderer:, env:, layouts: renderer.layouts, origin: action_end(renderer, action)) if logical
+      end
+      _body, definition, file = app.method_body(renderer.klass, action.to_sym)
+      record_ending_calls(renderer, definition, file) if definition.is_a?(Prism::DefNode)
+      own_writes = facts.writes.to_set(&:name)
+      own.each do |visit|
+        next if visit.origin.nil? || ends.empty?
+
+        visit.origin = visit.origin.dup.tap do |origin|
+          origin.callbacks = ends
+          origin.own_writes = own_writes
+        end
+      end
+      record_env(renderer, env, visits + own)
+    end
+
+    # The end of a callback's method and the ivars it uses, or nil for a block or a method without Ruby source.
+    def callback_end(renderer, callback, facts)
+      _body, definition, file = app.method_body(renderer.klass, callback.method.to_sym)
+      return nil unless definition.is_a?(Prism::DefNode)
+
+      record_ending_calls(renderer, definition, file)
+      [method_end(renderer, definition, file), Code.ivar_names(definition) | facts.writes.to_set(&:name)]
+    end
+
+    def record_ending_calls(renderer, definition, file)
+      Code.statement_calls(definition).each do |call|
+        next if call.block
+
+        ends = call.name == :render || Code::RESPONDS.include?(call.name) ||
+               (app.follow?(renderer.klass, call.name) && method_outcomes(renderer, call.name) == Set[:ends])
+        @ending_calls[[app.relative(file), call.location.start_offset]] = call if ends
+      end
+    end
+
+    # The end of an action's method, where its default template renders; nil for an action without one (a route to
+    # a template).
+    def action_end(renderer, action)
+      _body, definition, file = app.method_body(renderer.klass, action.to_sym)
+      definition && method_end(renderer, definition, file)
+    end
+
+    def method_end(renderer, definition, file)
+      exits = Code.returns(definition).reject do |node|
+        node.arguments && Code.sequence(node.arguments.arguments) { |name| self_call_outcomes(renderer, name) }.include?(:ends)
+      end
+      Handoff.new(app.relative(file), definition, :after, nil, nil, nil, nil, exits)
+    end
+
+    def self_call_outcomes(renderer, name) = app.follow?(renderer.klass, name) ? method_outcomes(renderer, name) : Code::CONTINUES
+
+    def record_env(renderer, env, visits)
+      env.each do |name, ivar|
+        next if name.start_with?('!')
+
+        writes = @renderer_ivars[renderer.name][name]
+        ivar.writes.each { |write| writes << write unless writes.any? { |w| w.key == write.key } }
       end
       visits
     end
 
     def responds?(facts) = facts.renders.any?(&:definite) || facts.responds.any?(&:definite)
+
+    # Whether every path through a method renders, responds or raises (`product_update`'s `if` renders and returns,
+    # and the rest redirects).
+    def always_ends?(renderer, name) = method_outcomes(renderer, name) == Set[:ends]
+
+    # A method's outcomes for its caller: a `return` in it continues the caller. A recursive call continues.
+    def method_outcomes(renderer, name)
+      key = [renderer.name, name]
+      return @outcomes[key] if @outcomes.key?(key)
+
+      @outcomes[key] = Code::CONTINUES
+      body, = app.method_body(renderer.klass, name)
+      return Code::CONTINUES if body.nil?
+
+      found = Code.outcomes(body) { |called| self_call_outcomes(renderer, called) }
+      @outcomes[key] = found.include?(:returns) ? (found - Set[:returns]) | Code::CONTINUES : found
+    end
 
     # A method's facts, with the writes and renders of the renderer's own methods it calls.
     def collect(renderer, name, seen)
@@ -114,13 +240,19 @@ module ErbViews
     end
 
     # `call` (a Code::SelfCall) binds the method's parameters for its renders.
+    # `seen` holds the methods being followed, so a recursive call stops; a method called twice is followed each
+    # time, with each call's arguments (`render_page(:show)` after `render_invalid_link`, which calls it too).
     def collect_method(renderer, method, seen, call = nil)
       key = [method.owner, method.name]
       return Code::Facts.empty unless seen.add?(key)
 
-      facts = @method_cache[key] ||= app.method_facts(method) || Code::Facts.empty
-      facts = bind(facts, method, call) if call && facts.renders.any?
-      expand(renderer, facts, seen, method)
+      begin
+        facts = @method_cache[key] ||= app.method_facts(method) || Code::Facts.empty
+        facts = bind(facts, method, call) if call && facts.renders.any?
+        expand(renderer, facts, seen, method)
+      ensure
+        seen.delete(key)
+      end
     end
 
     def bind(facts, method, call)
@@ -162,12 +294,21 @@ module ErbViews
             Code::Facts.empty
           end
         end
+        chain_writes = called.writes.to_set(&:name)
         called = conditional(called) unless call.definite
         result.writes.concat(called.writes)
-        result.renders.concat(called.renders)
+        result.renders.concat(called.renders.map { |render| via(render, call, chain_writes) })
         result.responds.concat(called.responds)
       end
       result
+    end
+
+    # A render in a method `call` follows, as its caller sees it.
+    def via(render, call, chain_writes)
+      render.dup.tap do |copy|
+        copy.via = [call] + (render.via || [])
+        copy.chain_writes = chain_writes
+      end
     end
 
     def conditional(facts)
@@ -233,7 +374,7 @@ module ErbViews
 
           logicals.map do |logical|
             record_call(render, logical, call_locals(render, nil, options, logical))
-            [logical, renderer, env, nil]
+            Visit.new(logical:, renderer:, env:, layouts: nil, origin: render_handoff(render))
           end
         else
           node = first || options[:template] || options[:action]
@@ -246,10 +387,17 @@ module ErbViews
           layouts = layout_option(renderer, options)
           templates.map do |template|
             record_call(render, template, call_locals(render, nil, options, template)) if options.key?(:locals)
-            [template, renderer, env, layouts]
+            Visit.new(logical: template, renderer:, env:, layouts:, origin: render_handoff(render))
           end
         end
       end
+    end
+
+    def render_handoff(render)
+      call = render.via&.first
+      return Handoff.new(render.file, render.node, :wrap) if call.nil?
+
+      Handoff.new(render.file, render.node, :wrap, Handoff.new(call.file, call.node, :wrap), render.chain_writes)
     end
 
     def layout_option(renderer, options)
@@ -280,7 +428,7 @@ module ErbViews
       if first.nil? && options.key?(:template)
         names = names(renderer.klass._helpers, options[:template], render.scope) || []
         return names.flat_map { |name| known?(name) ? app.resolve_all(name, [], partial: false) : [] }
-                    .map { |logical| [logical, renderer, env, nil] }
+                    .map { |logical| Visit.new(logical:, renderer:, env:, layouts: nil, origin: Handoff.new(render.file, render.node, :wrap)) }
       end
       node = first || options[:partial] || options[:layout]
       return [] if node.nil?
@@ -291,7 +439,7 @@ module ErbViews
 
       logicals.map do |logical|
         record_call(render, logical, call_locals(render, first, options, logical))
-        [logical, renderer, env, nil]
+        Visit.new(logical:, renderer:, env:, layouts: nil, origin: Handoff.new(render.file, render.node, :wrap))
       end
     end
 
@@ -310,7 +458,7 @@ module ErbViews
       locals = wrapper.locals && wrapper_locals(arguments[wrapper.locals[0]], wrapper.locals[1])
       logicals.map do |logical|
         record_call(call, logical, hash_locals(locals))
-        [logical, renderer, env, nil]
+        Visit.new(logical:, renderer:, env:, layouts: nil, origin: Handoff.new(call.file, call.node, :wrap))
       end
     end
 
@@ -354,10 +502,10 @@ module ErbViews
       locals = hash_locals(options[:locals])
       if options.key?(:collection) || options.key?(:object)
         as = Code.literal(options[:as]) || File.basename(logical).delete_prefix('_')
-        locals[as] = nil
+        locals[as] = options.key?(:collection) ? Element.new(options[:collection]) : options[:object]
         if options.key?(:collection)
-          locals["#{as}_counter"] = nil
-          locals["#{as}_iteration"] = nil
+          locals["#{as}_counter"] = Known.new('Integer')
+          locals["#{as}_iteration"] = Known.new('ActionView::PartialIteration')
         end
       end
       locals.except('partial', 'locals', 'collection', 'object', 'as', 'layout', 'cached', 'spacer_template', 'formats')

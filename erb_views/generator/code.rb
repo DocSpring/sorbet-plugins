@@ -12,8 +12,9 @@ module ErbViews
     IvarWrite = Struct.new(:name, :file, :node, :value, :definite, keyword_init: true)
     SelfCall = Struct.new(:name, :file, :node, :scope, :definite, keyword_init: true)
     # `bindings`: when the render is in a method the graph followed from a call, the method's parameters =>
-    # [the call's argument, the caller's scope] (`render template` in `render_page(:new, 'Title')`).
-    Render = Struct.new(:file, :node, :scope, :definite, :bindings, keyword_init: true)
+    # [the call's argument, the caller's scope] (`render template` in `render_page(:new, 'Title')`). `via`: the
+    # SelfCalls that lead to it, outermost first, and `chain_writes`: the ivars the outermost call's method assigns.
+    Render = Struct.new(:file, :node, :scope, :definite, :bindings, :via, :chain_writes, keyword_init: true)
     # A call that ends the response (`redirect_to`, `head`, `send_data`...), so no template renders after it.
     Respond = Struct.new(:name, :definite, keyword_init: true)
 
@@ -211,6 +212,92 @@ module ErbViews
     module_function
 
     def scan(node, file) = Scanner.new(file).scan(node)
+
+    CONTINUES = Set[:continue].freeze
+
+    # The calls on self that are statements in a method's body (not inside a block, a lambda or another method):
+    # the ones the type probe can put a `return` before.
+    def statement_calls(node, found = [])
+      case node
+      when Prism::DefNode then statement_calls(node.body, found) if found.empty? && node.body
+      when Prism::BlockNode, Prism::LambdaNode then nil
+      when Prism::StatementsNode
+        node.body.each do |statement|
+          if statement.is_a?(Prism::CallNode) && (statement.receiver.nil? || statement.receiver.is_a?(Prism::SelfNode))
+            found << statement
+          end
+          statement_calls(statement, found)
+        end
+      when Prism::Node then node.compact_child_nodes.each { |child| statement_calls(child, found) unless child.is_a?(Prism::DefNode) }
+      end
+      found
+    end
+
+    # The `return`s in a method's body (not in a block, a lambda or another method).
+    def returns(node, found = [])
+      found << node if node.is_a?(Prism::ReturnNode)
+      node.compact_child_nodes.each do |child|
+        returns(child, found) unless child.is_a?(Prism::DefNode) || child.is_a?(Prism::BlockNode) || child.is_a?(Prism::LambdaNode)
+      end
+      found
+    end
+
+    # The instance variables a method reads or assigns.
+    def ivar_names(node, found = Set.new)
+      case node
+      when Prism::InstanceVariableReadNode, Prism::InstanceVariableWriteNode, Prism::InstanceVariableTargetNode,
+           Prism::InstanceVariableOrWriteNode, Prism::InstanceVariableAndWriteNode, Prism::InstanceVariableOperatorWriteNode
+        found << node.name.to_s
+      end
+      node.compact_child_nodes.each { |child| ivar_names(child, found) unless child.is_a?(Prism::DefNode) } if node.is_a?(Prism::Node)
+      found
+    end
+
+    # How the paths through some code can end: `:ends` (it rendered, responded or raised), `:returns` (a `return`
+    # before any of those) or `:continue` (it ran to the end). `self_call` gives a call to the renderer's own method
+    # its outcomes. An action whose method can't `:continue` or `:return` never renders its default template.
+    def outcomes(node, &self_call)
+      case node
+      when Prism::StatementsNode then sequence(node.body, &self_call)
+      when Prism::BeginNode
+        found = outcomes(node.statements, &self_call)
+        node.rescue_clause ? found | outcomes(node.rescue_clause.statements, &self_call) : found
+      when Prism::ParenthesesNode then outcomes(node.body, &self_call)
+      when Prism::IfNode
+        either(node.statements, node.subsequent.is_a?(Prism::ElseNode) ? node.subsequent.statements : node.subsequent, &self_call)
+      when Prism::UnlessNode then either(node.statements, node.else_clause&.statements, &self_call)
+      when Prism::CaseNode, Prism::CaseMatchNode
+        branches = node.conditions.map { |branch| branch.statements } + [node.else_clause&.statements]
+        branches.map { |branch| branch ? outcomes(branch, &self_call) : CONTINUES }.reduce(:|)
+      when Prism::AndNode, Prism::OrNode then sequence([node.left], CONTINUES | outcomes(node.right, &self_call), &self_call)
+      when Prism::ReturnNode
+        node.arguments && sequence(node.arguments.arguments, &self_call).include?(:ends) ? Set[:ends] : Set[:returns]
+      when Prism::CallNode then call_outcomes(node, &self_call)
+      else CONTINUES
+      end
+    end
+
+    # The statements in order: the paths that continue past one run the next.
+    def sequence(statements, tail = nil, &self_call)
+      found = CONTINUES
+      statements.each do |statement|
+        break unless found.include?(:continue)
+
+        found = (found - CONTINUES) | outcomes(statement, &self_call)
+      end
+      tail && found.include?(:continue) ? (found - CONTINUES) | tail : found
+    end
+
+    def either(first, second, &self_call)
+      (first ? outcomes(first, &self_call) : CONTINUES) | (second ? outcomes(second, &self_call) : CONTINUES)
+    end
+
+    def call_outcomes(node, &self_call)
+      return CONTINUES unless node.receiver.nil? || node.receiver.is_a?(Prism::SelfNode)
+      return Set[:ends] if %i[render raise fail].include?(node.name) || RESPONDS.include?(node.name)
+
+      self_call ? self_call.call(node.name) : CONTINUES
+    end
 
     # A literal string or symbol's value, or nil.
     def literal(node)
