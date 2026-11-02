@@ -14,9 +14,11 @@ module ErbViews
     Write = Struct.new(:file, :node, :value, keyword_init: true) do
       def key = [file, node.location.start_offset]
     end
-    # A literal render a template makes of a partial, with the locals it passes (name => value node, or nil when
-    # the value isn't in the call, as with `collection:`'s local).
+    # A literal render a template makes of a partial, with the locals it passes: name => the value's node, nil when
+    # the value isn't in the call (a key of a hash the call splats), or MAYBE when the hash gets the key only by index
+    # (`options[:label] = x if y`), which may not run.
     PartialCall = Struct.new(:file, :node, :partial, :locals, keyword_init: true)
+    MAYBE = :maybe
     # A local whose value isn't a node in the call: an element of `collection:` (its node), or a fixed type.
     Element = Struct.new(:node)
     Known = Struct.new(:type)
@@ -80,6 +82,7 @@ module ErbViews
     private
 
     def build
+      record_ruby_renders
       queue = []
       app.renderers.each do |renderer|
         renderer.actions.each { |action| queue.concat(action_visits(renderer, action)) }
@@ -496,7 +499,8 @@ module ErbViews
       if first
         splats = (render.node.arguments&.arguments || []).grep(Prism::KeywordHashNode).flat_map(&:elements).grep(Prism::AssocSplatNode)
         splatted = splats.flat_map { |splat| Code.hash_keys(splat.value, render.scope) }
-        return splatted.to_h { |key| [key, nil] }.merge(options.to_h { |key, value| [key.to_s, value] })
+        sure = splats.flat_map { |splat| Code.hash_keys(splat.value, render.scope, index: false) }
+        return splatted.to_h { |key| [key, sure.include?(key) ? nil : MAYBE] }.merge(options.to_h { |key, value| [key.to_s, value] })
       end
 
       locals = hash_locals(options[:locals])
@@ -525,6 +529,36 @@ module ErbViews
         key = element.is_a?(Prism::AssocNode) && Code.literal(element.key)
         locals[key] = element.value if key
       end
+    end
+
+    # The partials that Ruby outside the controllers and views renders by name, with the locals it passes: helpers
+    # (`render 'layouts/messages', column:`) and components (`helpers.render('kaminari/nocount_paginator', ...)`).
+    # Only names with a slash: one without resolves with the prefixes of whichever controller renders the view.
+    def record_ruby_renders
+      Dir.glob(File.join(app.root, '{app/helpers,app/components}/**/*.rb')).sort.each do |path|
+        file = app.relative(path)
+        stack = [[Prism.parse_file(path).value, nil]]
+        until stack.empty?
+          node, scope = stack.pop
+          scope = node if node.is_a?(Prism::DefNode)
+          stack.concat(node.compact_child_nodes.map { |child| [child, scope] })
+          next unless node.is_a?(Prism::CallNode) && node.name == :render && view_receiver?(node.receiver)
+
+          first, options = Code.render_arguments(node)
+          name = Code.literal(first || options[:partial])
+          next if name.nil? || !name.include?('/') || (first.nil? && (options.keys & NOT_TEMPLATES).any?)
+
+          logical = app.resolve(name, [], partial: true) or next
+          render = Code::Render.new(file:, node:, scope:, definite: false)
+          record_call(render, logical, call_locals(render, first, options, logical))
+        end
+      end
+    end
+
+    # self, or a component's `helpers` or `view_context`.
+    def view_receiver?(node)
+      node.nil? || node.is_a?(Prism::SelfNode) ||
+        (node.is_a?(Prism::CallNode) && node.receiver.nil? && %i[helpers view_context].include?(node.name))
     end
 
     # A render the generator can't follow. Returns no visits.

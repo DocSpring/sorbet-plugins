@@ -47,6 +47,7 @@ module SorbetViews
       class CardPartialHtml < ViewBase; end
       class NoLocalsPartialHtml < ViewBase; end
       class AnyLocalsPartialHtml < ViewBase; end
+      class TwicePartialHtml < ViewBase; end
 
       # What the generator declares for each partial a view renders by name: the partial's locals.
       class CardsHtml < ViewBase

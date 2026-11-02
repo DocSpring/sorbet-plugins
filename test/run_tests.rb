@@ -74,9 +74,10 @@ end
 
 puts "#{fixtures} fixtures, #{failures} failed"
 
-# A generator's own tests (`<plugin>/generator/test/*_test.rb`), for the parts that don't need an app.
+# A generator's own tests (`<plugin>/generator/test/*_test.rb`), for the parts that don't need an app. SORBET is the
+# binary, for tests that compare the generator with the plugin.
 test_failures = plugins.flat_map { |plugin| Dir.glob(File.join(root, plugin, 'generator', 'test', '*_test.rb')).sort }.count do |test|
   puts "Running #{test.delete_prefix("#{root}/")}"
-  !system(RbConfig.ruby, test)
+  !system({ 'SORBET' => sorbet }, RbConfig.ruby, test)
 end
 exit(failures.zero? && test_failures.zero? ? 0 : 1)

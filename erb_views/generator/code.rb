@@ -311,9 +311,10 @@ module ErbViews
     UNKNOWN = "\0"
 
     # The strings an expression can be, as far as reading the code tells: literals, interpolations (an unknown part
-    # becomes UNKNOWN), the branches of an `if` or `case`, the values assigned to a local variable in `scope`, and
-    # what a method returns (`method_body` gives a self call's [body, scope], or nil). nil when it isn't a string we
-    # can follow, as with `render @record` or a block's parameter.
+    # becomes UNKNOWN), the branches of an `if` or `case`, the values assigned to a local variable in `scope` or that
+    # it takes as a block's parameter over a constant list (`TABS.each do |tab|`), and what a method returns
+    # (`method_body` gives a self call's [body, scope], or nil). nil when it isn't a string we can follow, as with
+    # `render @record` or another block's parameter.
     def string_values(node, scope, depth = 0, bindings = nil, &method_body)
       return nil if node.nil? || depth > 6
 
@@ -331,7 +332,8 @@ module ErbViews
                  end
                when Prism::LocalVariableReadNode
                  writes = local_writes(scope, node.name)
-                 found = writes.map { |value| string_values(value, scope, depth + 1, &method_body) }
+                 found = writes.map { |value| string_values(value, scope, depth + 1, &method_body) } +
+                         local_block_values(scope, node.name)
                  found.empty? || found.any?(&:nil?) ? nil : found.flatten
                when Prism::ParenthesesNode then string_values(node.body, scope, depth + 1, &method_body)
                when Prism::StatementsNode then string_values(node.body.last, scope, depth + 1, &method_body)
@@ -352,9 +354,10 @@ module ErbViews
     end
 
     # The keys a hash expression has, as far as reading the code tells: a literal's keys, the keys of the hashes it
-    # splats, a local's values, and what a lambda in a local returns (`color.call('x', a: 1)` with
-    # `color = ->(key, **options) { { key:, **options } }` has key and a). Unknown splats add nothing.
-    def hash_keys(node, scope, depth = 0, bindings = nil)
+    # splats, a local's values and the keys it's given (`options[:label] = x`), and what a lambda in a local returns
+    # (`color.call('x', a: 1)` with `color = ->(key, **options) { { key:, **options } }` has key and a). Unknown
+    # splats add nothing. With `index: false`, without the keys given by index (which may be given only sometimes).
+    def hash_keys(node, scope, depth = 0, bindings = nil, index: true)
       return [] if node.nil? || depth > 6
 
       case node
@@ -362,22 +365,23 @@ module ErbViews
         node.elements.flat_map do |element|
           case element
           when Prism::AssocNode then [literal(element.key)].compact
-          when Prism::AssocSplatNode then hash_keys(element.value, scope, depth + 1, bindings)
+          when Prism::AssocSplatNode then hash_keys(element.value, scope, depth + 1, bindings, index:)
           else []
           end
         end
       when Prism::LocalVariableReadNode
         if bindings&.key?(node.name)
           argument, caller = bindings.fetch(node.name)
-          hash_keys(argument, caller, depth + 1)
+          hash_keys(argument, caller, depth + 1, index:)
         else
-          local_writes(scope, node.name).flat_map { |value| hash_keys(value, scope, depth + 1, bindings) }
+          local_writes(scope, node.name).flat_map { |value| hash_keys(value, scope, depth + 1, bindings, index:) } +
+            (index ? local_index_keys(scope, node.name) : [])
         end
-      when Prism::ParenthesesNode then hash_keys(node.body, scope, depth + 1, bindings)
-      when Prism::StatementsNode then hash_keys(node.body.last, scope, depth + 1, bindings)
+      when Prism::ParenthesesNode then hash_keys(node.body, scope, depth + 1, bindings, index:)
+      when Prism::StatementsNode then hash_keys(node.body.last, scope, depth + 1, bindings, index:)
       when Prism::CallNode
         if %i[call ()].include?(node.name) && node.receiver.is_a?(Prism::LocalVariableReadNode)
-          local_writes(scope, node.receiver.name).flat_map { |value| lambda_keys(value, node, scope, depth) }
+          local_writes(scope, node.receiver.name).flat_map { |value| lambda_keys(value, node, scope, depth, index:) }
         else
           []
         end
@@ -386,7 +390,7 @@ module ErbViews
     end
 
     # The keys a lambda returns when `call` calls it: its keyword-rest parameter is the call's keywords.
-    def lambda_keys(lambda, call, scope, depth)
+    def lambda_keys(lambda, call, scope, depth, index: true)
       lambda = lambda.block if lambda.is_a?(Prism::CallNode) && lambda.name == :lambda && lambda.receiver.nil?
       return [] unless (lambda.is_a?(Prism::LambdaNode) || lambda.is_a?(Prism::BlockNode)) && lambda.body
 
@@ -394,7 +398,7 @@ module ErbViews
       keyrest = parameters&.keyword_rest
       keywords = call.arguments&.arguments&.find { |argument| argument.is_a?(Prism::KeywordHashNode) }
       bindings = keyrest.respond_to?(:name) && keyrest.name && keywords ? { keyrest.name => [keywords, scope] } : {}
-      hash_keys(lambda.body, scope, depth + 1, bindings)
+      hash_keys(lambda.body, scope, depth + 1, bindings, index:)
     end
 
     def embedded_values(part, scope, depth, &method_body)
@@ -423,6 +427,58 @@ module ErbViews
       writes.fetch(name, [])
     end
 
+    ITERATORS = %i[each each_with_index map flat_map filter_map select each_slice].freeze
+
+    # For each block in `scope` whose first parameter is `name`: the strings the parameter takes, when the block
+    # iterates a constant that holds strings or symbols (`TABS.each do |tab|`, read from the running app), or nil.
+    def local_block_values(scope, name)
+      found = []
+      stack = [scope]
+      until stack.empty?
+        node = stack.pop
+        next if node.is_a?(Prism::DefNode) && !node.equal?(scope)
+
+        stack.concat(node.compact_child_nodes)
+        next unless node.is_a?(Prism::CallNode) && node.block.is_a?(Prism::BlockNode)
+
+        first = node.block.parameters&.parameters&.requireds&.first
+        next unless first.is_a?(Prism::RequiredParameterNode) && first.name == name
+
+        found << constant_strings(node)
+      end
+      found
+    end
+
+    def constant_strings(call)
+      return nil unless ITERATORS.include?(call.name) && (call.receiver.is_a?(Prism::ConstantReadNode) || call.receiver.is_a?(Prism::ConstantPathNode))
+
+      value = Object.const_get(call.receiver.slice.delete_prefix('::'))
+      value.map(&:to_s) if value.is_a?(Array) && value.all? { |item| item.is_a?(String) || item.is_a?(Symbol) }
+    rescue NameError
+      nil
+    end
+
+    # The literal keys a local hash is given anywhere in `scope`: `options[:label] = x`.
+    def local_index_keys(scope, name)
+      @local_index_keys ||= {}.compare_by_identity
+      keys = @local_index_keys[scope] ||= begin
+        found = Hash.new { |hash, key| hash[key] = [] }
+        stack = [scope]
+        until stack.empty?
+          node = stack.pop
+          next if node.is_a?(Prism::DefNode) && !node.equal?(scope)
+
+          if node.is_a?(Prism::CallNode) && node.name == :[]= && node.receiver.is_a?(Prism::LocalVariableReadNode)
+            key = literal(node.arguments&.arguments&.first)
+            found[node.receiver.name] << key if key
+          end
+          stack.concat(node.compact_child_nodes)
+        end
+        found
+      end
+      keys.fetch(name, [])
+    end
+
     # A render call's arguments: [first positional argument, { option => value node }].
     def render_arguments(call)
       arguments = call.arguments&.arguments || []
@@ -441,6 +497,48 @@ module ErbViews
       first = nil if first.is_a?(Prism::KeywordHashNode) || first.is_a?(Prism::HashNode)
       [first, options]
     end
+
+    # The partial names of the renders in a view that the plugin turns into calls (`PartialRenders` in ErbViews.cc):
+    # `render 'row'` or `render('row', { a: 1 })` with symbol keys, and `render partial: 'row'` with only `locals:`
+    # (a hash with symbol keys) besides. A receiver other than self, a block, a `**` or a key that isn't a symbol
+    # leaves a render as it is.
+    def partial_render_names(node)
+      names = []
+      stack = [node]
+      until stack.empty?
+        current = stack.pop
+        stack.concat(current.compact_child_nodes)
+        name = current.is_a?(Prism::CallNode) && current.name == :render && partial_render_name(current)
+        names << name if name
+      end
+      names.uniq.sort
+    end
+
+    def partial_render_name(call)
+      return nil unless call.receiver.nil? || call.receiver.is_a?(Prism::SelfNode)
+      return nil if call.block
+
+      arguments = call.arguments&.arguments || []
+      keywords = arguments.last.is_a?(Prism::KeywordHashNode) ? arguments.last : nil
+      positional = keywords ? arguments[0...-1] : arguments
+      # Sorbet reads trailing pairs with any key that isn't a symbol (`'a' => 1`) as a positional hash.
+      return nil unless keywords.nil? || keywords.elements.all? { |e| e.is_a?(Prism::AssocNode) && e.key.is_a?(Prism::SymbolNode) }
+
+      if [1, 2].include?(positional.size)
+        return nil unless positional.first.is_a?(Prism::StringNode)
+        return nil if positional.size == 2 && (keywords || !symbol_hash?(positional[1]))
+
+        positional.first.unescaped
+      elsif positional.empty? && keywords
+        options = keywords.elements.to_h { |element| [element.key.is_a?(Prism::SymbolNode) ? element.key.unescaped : nil, element.value] }
+        return nil unless options.keys.all? { |key| %w[partial locals].include?(key) } && options['partial'].is_a?(Prism::StringNode)
+        return nil if options.key?('locals') && !symbol_hash?(options['locals'])
+
+        options['partial'].unescaped
+      end
+    end
+
+    def symbol_hash?(node) = node.is_a?(Prism::HashNode) && node.elements.all? { |e| e.is_a?(Prism::AssocNode) && e.key.is_a?(Prism::SymbolNode) }
 
     # The DefNode for each `def` in a file, by its first line.
     def defs_by_line(path) = nodes_by_line(path)[:defs]

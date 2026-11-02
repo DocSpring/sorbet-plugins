@@ -250,12 +250,12 @@ struct Locals {
     ast::Send::ARGS_store types;
 };
 
-// Takes the statement into `locals` if a magic comment made it.
+// Takes the statement into `locals` if a magic comment made it. Only the first locals comment counts, as in Rails.
 bool takeLocals(core::MutableContext ctx, ast::ExpressionPtr &stat, Locals &locals) {
     if (auto assign = ast::cast_tree<ast::Assign>(stat)) {
         auto ident = ast::cast_tree<ast::UnresolvedIdent>(assign->lhs);
         auto lambda = ast::cast_tree<ast::Send>(assign->rhs);
-        if (ident == nullptr || ident->kind != ast::UnresolvedIdent::Kind::Local ||
+        if (locals.declared || ident == nullptr || ident->kind != ast::UnresolvedIdent::Kind::Local ||
             ident->name != ctx.state.enterNameUTF8("__locals") || lambda == nullptr ||
             lambda->fun != core::Names::lambda() || lambda->block() == nullptr) {
             return false;

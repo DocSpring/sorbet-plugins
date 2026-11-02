@@ -1,8 +1,8 @@
 # frozen_string_literal: true
 
 module ErbViews
-  # The class names the plugin gives templates: `classPath` and `camelize` in ErbViews.cc. Keep the two in step:
-  # test/generator_test.rb checks them against the plugin's errors.
+  # The names the plugin gives templates and partials' methods: `classPath`, `camelize` and `partialMethod` in
+  # ErbViews.cc. Keep the two in step: generator/test/generator_test.rb checks the class names against the plugin's.
   module Names
     VIEWS_DIR = 'app/views/'
     COMPONENTS_DIR = 'app/components/'
@@ -41,6 +41,14 @@ module ErbViews
       formats.each { |format| name += camelize(format) }
       parts << name
       parts.map { |part| part.empty? || part.match?(/\A\d/) ? "N#{part}" : part }
+    end
+
+    # The method a view's `render 'templates/row'` calls: `__partial__templates__row`. nil for a name the plugin
+    # leaves as a render (anything but ASCII letters, digits, `_` and inner single slashes). `partialMethod`.
+    def partial_method(name)
+      return nil unless name.match?(%r{\A[A-Za-z0-9_]+(/[A-Za-z0-9_]+)*\z})
+
+      "__partial__#{name.gsub('/', '__')}"
     end
 
     # `::SorbetViews::Contexts::Templates::ShowHtml` for app/views/templates/show.html.erb, or nil.

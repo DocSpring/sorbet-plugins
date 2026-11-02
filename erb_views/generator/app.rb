@@ -48,6 +48,27 @@ module ErbViews
       end
     end
 
+    # Whether a partial name that isn't an ERB template in the app resolves, with any of `prefix_sets`, to another
+    # template: one with another handler (`_ie9_warning.html`) or in a gem's or engine's views (Devise's, Kaminari's).
+    def other_partial?(name, prefix_sets)
+      name = name.delete_prefix('/')
+      candidates = if name.include?('/')
+                     dir, base = File.split(name)
+                     ["#{dir}/_#{base}"]
+                   else
+                     prefix_sets.flatten.uniq.map { |prefix| "#{prefix}/_#{name}" }
+                   end
+      view_paths.any? { |path| candidates.any? { |candidate| Dir.glob(File.join(path, "#{candidate}.*")).any? } }
+    end
+
+    # The view directories that controllers and mailers render from: the app's, and its gems' and engines'.
+    def view_paths
+      @view_paths ||= [ActionController::Base, (ActionMailer::Base if defined?(ActionMailer::Base))].compact
+                        .flat_map { |klass| klass.view_paths.to_a }
+                        .filter_map { |resolver| resolver.respond_to?(:path) ? File.expand_path(resolver.path.to_s) : nil }
+                        .uniq
+    end
+
     # A layout's logical name, as ActionView::Layouts normalizes it: `layouts/` goes in front unless it's there.
     def self.layout_name(name) = name.match?(/\blayouts/) ? name : "layouts/#{name}"
 

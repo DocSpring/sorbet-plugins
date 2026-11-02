@@ -1,15 +1,21 @@
 # frozen_string_literal: true
 
-# Tests for the generator's parts that don't need a Rails app: reading Sorbet's types, and the code facts the render
-# graph and the type probe use. The rest of the generator runs against the app it generates for.
+# Tests for the generator's parts that don't need a Rails app: reading Sorbet's types, the code facts the render graph
+# and the type probe use, partials' locals, and the parts that must match the plugin (the templates' Ruby and class
+# names), checked against the plugin itself when SORBET names the binary. The rest of the generator runs against the
+# app it generates for.
 #
-#   ruby erb_views/generator/test/generator_test.rb
+#   SORBET=path/to/sorbet ruby erb_views/generator/test/generator_test.rb
 
 ENV['MT_NO_PLUGINS'] = '1' # other gems' Minitest plugins can load conflicting dependencies
 require 'minitest/autorun'
 require 'set'
+require 'open3'
 require_relative '../code'
+require_relative '../names'
+require_relative '../partial_locals'
 require_relative '../sorbet_type'
+require_relative '../template_ruby'
 
 class SorbetTypeTest < Minitest::Test
   def type(text) = ErbViews::SorbetType.widen(ErbViews::SorbetType.parse(text))
@@ -129,6 +135,24 @@ class CodeTest < Minitest::Test
     assert_equal 2, ErbViews::Code.returns(node).size
   end
 
+  def test_hash_keys_follow_a_local_and_the_keys_it_is_given
+    scope = Prism.parse("options = { status: 1 }\noptions[:label] = 2 if x\nrender 'a', **options").value
+    splat = scope.statements.body.last.arguments.arguments.last.elements.first
+    assert_equal %w[status label], ErbViews::Code.hash_keys(splat.value, scope)
+  end
+
+  TABS = %w[general privacy].freeze
+
+  def test_a_block_parameter_over_a_constant_list
+    scope = Prism.parse("CodeTest::TABS.each do |tab|\n  render \"settings/\#{tab}\"\nend\nOTHER.each { |tab| x }").value
+    render = scope.statements.body.first.block.body.body.first
+    # OTHER isn't defined, so `tab` could be anything.
+    assert_equal ["settings/#{ErbViews::Code::UNKNOWN}"], ErbViews::Code.string_values(render.arguments.arguments.first, scope)
+    scope = Prism.parse("CodeTest::TABS.each do |tab|\n  render \"settings/\#{tab}\"\nend").value
+    render = scope.statements.body.first.block.body.body.first
+    assert_equal %w[settings/general settings/privacy], ErbViews::Code.string_values(render.arguments.arguments.first, scope)
+  end
+
   def test_ivar_names
     node = method_node("def a\n  @a = 1\n  @b ||= @c\n  @d += 1\n  def inner = @e\nend")
     assert_equal Set['@a', '@b', '@c', '@d'], ErbViews::Code.ivar_names(node)
@@ -146,5 +170,99 @@ class CodeTest < Minitest::Test
     RUBY
     assert_equal({ '@a' => true, '@b' => false, '@c' => false }, facts.writes.to_h { |write| [write.name, write.definite] })
     refute facts.renders.first.definite
+  end
+end
+
+class PartialLocalsTest < Minitest::Test
+  def locals(source) = ErbViews::PartialLocals.read(source)
+
+  def test_reads_the_locals_and_their_types
+    partial = locals(<<~ERB)
+      <%# locals: (template:, title: 'Card', count: 1, **) -%>
+      <%# sig { params(template: Template, count: T.nilable(Integer)) } -%>
+      <p><%= template.name %></p>
+    ERB
+    assert_equal %w[template title count], partial.names
+    assert_equal [true, false, false], partial.params.map(&:required)
+    assert_equal ['Template', nil, 'T.nilable(Integer)'], partial.params.map(&:type)
+    assert_equal <<~RBI.chomp, partial.method_rbi('__partial__templates__card')
+      \  sig { params(template: Template, title: T.untyped, count: T.nilable(Integer), __rest: T.untyped).returns(T.untyped) }
+      \  def __partial__templates__card(template:, title: T.unsafe(nil), count: T.unsafe(nil), **__rest); end
+    RBI
+  end
+
+  def test_a_multi_line_comment_and_a_named_rest
+    partial = locals("<%#  locals: (a:,\n  **opts) %>\n<%# sig { params(opts: String) } %>\n")
+    assert_equal ['a'], partial.names
+    assert_equal ['opts', 'String'], [partial.rest, partial.rest_type]
+  end
+
+  def test_no_locals
+    assert_equal "  sig { returns(T.untyped) }\n  def __partial__x; end", locals("<%# locals: () %>\n").method_rbi('__partial__x')
+    assert_nil locals("<p><%= x %></p>\n")
+    assert_nil locals("<%#locals: (a:) %>\n") # Rails wants a space after the `#`
+  end
+
+  def test_only_the_first_locals_comment_counts
+    assert_equal ['a'], locals("<%# locals: (a:) %>\n<%# locals: (b:) %>\n").names
+  end
+end
+
+class PartialRendersTest < Minitest::Test
+  def names(erb) = ErbViews::Code.partial_render_names(Prism.parse(ErbViews::TemplateRuby.call(erb)).value)
+
+  def test_literal_renders
+    assert_equal %w[a b c d e], names(<<~ERB)
+      <%= render 'a' %><%= render 'b', x: 1 %><%= render('c', { x: 1 }) %>
+      <%= render partial: 'd' %><%= render partial: 'e', locals: { x: 1 } %>
+    ERB
+  end
+
+  def test_renders_that_stay_renders
+    assert_empty names(<<~ERB)
+      <%= render name %><%= render 'a' do %>x<% end %><%= render 'b', **opts %><%= render 'c', 'x' => 1 %>
+      <%= render partial: 'd', collection: [] %><%= render partial: 'e', locals: opts %><%= helper.render 'f' %>
+      <%= render :g %><%= render "h\#{i}" %><%= render('j', { 'x' => 1 }) %><%= render 'k', a: 1, 'b' => 2 %>
+    ERB
+  end
+
+  def test_method_names
+    assert_equal '__partial__templates__row', ErbViews::Names.partial_method('templates/row')
+    [%w[/a a/ a//b a.html a-b] + ['']].flatten.each { |name| assert_nil ErbViews::Names.partial_method(name), name }
+  end
+end
+
+# The generator's copies of the plugin's transform and class names, against the plugin, for every fixture template.
+class PluginConformanceTest < Minitest::Test
+  FIXTURES = File.expand_path('../../test', __dir__)
+
+  def setup
+    @sorbet = ENV.fetch('SORBET', '')
+    skip 'set SORBET to the Sorbet binary with the erb_views plugin' if @sorbet.empty?
+    @templates = Dir.glob('app/**/*.erb', base: FIXTURES).sort
+  end
+
+  def sorbet(*args, env: {})
+    Open3.capture3({ 'SORBET_SILENCE_DEV_MESSAGE' => '1' }.merge(env), @sorbet, '--no-config', '--enable-plugin=erb_views',
+                   '--allowed-extension=.rb,.rbi,.erb', '--max-threads=1', *args, chdir: FIXTURES)
+  end
+
+  def test_template_ruby_matches_the_plugin
+    _out, err, _status = sorbet('--stop-after=parser', *@templates, env: { 'SORBET_ERB_VIEWS_PRINT' => '1' })
+    printed = err.b.scan(/erb_views: (\S+)\n(.*?)\0/m).to_h
+    @templates.each do |template|
+      assert_equal printed.fetch(template.b), ErbViews::TemplateRuby.call(File.read(File.join(FIXTURES, template))).b, template
+    end
+  end
+
+  def test_class_names_match_the_plugin
+    out, _err, _status = sorbet('--print=symbol-table', '--quiet', 'stubs.rbi', *@templates)
+    @templates.each do |template|
+      relative, component = ErbViews::Names.template_path(template)
+      next if relative.nil?
+
+      name = "::SorbetViews::#{ErbViews::Names.class_parts(relative, component).join('::')}"
+      assert_includes out, "class #{name} < ", template
+    end
   end
 end

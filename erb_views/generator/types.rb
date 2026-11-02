@@ -85,12 +85,17 @@ module ErbViews
       render(SorbetType.union(types))
     end
 
-    # The union of what every caller passes; a caller that leaves the local out makes it nilable.
-    def local_type(logical, name)
+    # The union of what every caller passes; a caller that leaves the local out makes it nilable. For a partial's sig
+    # comment (`sig: true`): constants as the app writes them (`T.nilable(User)`), and the union of the values Sorbet
+    # could type, as a caller that passes an untyped value passes any sig.
+    def local_type(logical, name, sig: false)
       calls = @graph.contexts.key?(logical) ? @graph.contexts[logical].calls : []
       return 'T.untyped' if calls.empty?
 
-      render(SorbetType.union(calls.map { |call| call.locals.key?(name) ? value_type(call.file, call.locals[name]) : NIL }))
+      types = calls.map { |call| call.locals.key?(name) ? value_type(call.file, call.locals[name]) : NIL }
+      types -= [SorbetType::UNTYPED] if sig && (types - [SorbetType::UNTYPED, NIL]).any?
+      type = SorbetType.render(SorbetType.union(types))
+      sig ? type : Types.qualify(type)
     end
 
     private
@@ -136,7 +141,7 @@ module ErbViews
 
     def value_type(file, value)
       case value
-      when nil then SorbetType::UNTYPED
+      when nil, RenderGraph::MAYBE then SorbetType::UNTYPED
       when RenderGraph::Known then SorbetType.parse(value.type)
       when RenderGraph::Element then SorbetType.element(@revealed.fetch(value_key(file, value.node), SorbetType::UNTYPED))
       else @revealed.fetch(value_key(file, value), SorbetType::UNTYPED)

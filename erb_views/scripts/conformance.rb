@@ -1,14 +1,15 @@
 # frozen_string_literal: true
 
-# Checks the plugin's Ruby for every template in an app against Herb's (https://herb-tools.dev), which parses ERB as
-# Rails does, and against the generator's copy of the transform (generator/template_ruby.rb), and that Sorbet parses
-# all of it. Run it with the herb gem installed:
+# Checks the plugin's Ruby for every template in an app against the generator's copy of the transform
+# (generator/template_ruby.rb), that the copy without its magic comments (`locals:` and `sig`, which Herb leaves as
+# comments) matches Herb's (https://herb-tools.dev), which parses ERB as Rails does, and that Sorbet parses all of it.
+# Run it with the herb gem installed:
 #
 #   gem install herb
 #   ruby erb_views/scripts/conformance.rb path/to/sorbet path/to/app
 #
-# It prints each template whose Ruby differs from `Herb.extract_ruby`'s or the generator's, with the first line that
-# differs, and each syntax error, and exits 1 if there are any.
+# It prints each template whose Ruby differs, with the first line that differs, and each syntax error, and exits 1 if
+# there are any.
 
 require 'herb'
 require 'open3'
@@ -35,11 +36,11 @@ while (start = rest.index('erb_views: '))
 end
 syntax_errors = rest.lines.grep(/https:\/\/srb\.help\/2\d\d\d/)
 
-def first_difference(name, ours, other_name, other)
+def first_difference(name, ours_name, ours, other_name, other)
   ours_lines = ours.split("\n", -1)
   other_lines = other.split("\n", -1)
   line = (0...[ours_lines.size, other_lines.size].max).find { |i| ours_lines[i] != other_lines[i] }
-  ["#{name}:#{line + 1}", "  plugin:    #{ours_lines[line].inspect}", "  #{other_name}: #{other_lines[line].inspect}"]
+  ["#{name}:#{line + 1}", "  #{ours_name}: #{ours_lines[line].inspect}", "  #{other_name}: #{other_lines[line].inspect}"]
 end
 
 differences = 0
@@ -49,9 +50,10 @@ templates.each do |template|
   name = template.delete_prefix("#{app}/")
   herb = Herb.extract_ruby(source)
   port = ErbViews::TemplateRuby.call(source)
+  plain = ErbViews::TemplateRuby.call(source, magic: false)
   problems = []
-  problems.concat(first_difference(name, ours, 'herb     ', herb)) unless ours == herb
-  problems.concat(first_difference(name, ours, 'generator', port)) unless ours == port
+  problems.concat(first_difference(name, 'plugin   ', ours, 'generator', port)) unless ours == port
+  problems.concat(first_difference(name, 'no magic ', plain, 'herb     ', herb)) unless plain == herb
   next if problems.empty?
 
   differences += 1

@@ -1,14 +1,19 @@
 # frozen_string_literal: true
 
+require_relative 'code'
 require_relative 'names'
+require_relative 'partial_locals'
 require_relative 'signatures'
+require_relative 'template_ruby'
 require_relative 'types'
 
 module ErbViews
   # Writes sorbet/rbi/plugins/erb_views.rbi: a context class per template, which the plugin's class for the template
   # inherits. A controller template's context inherits its controller's `HelperProxy` (Tapioca's view class: every
   # helper module, and the `helper_method`s with their sigs), a mailer template's the mailer's helpers, a component
-  # template's the component. Each context declares the ivars that reach the template and, for a partial, its locals.
+  # template's the component. Each context declares the ivars that reach the template and, for a partial without a
+  # locals comment, its locals (with one, they're the template's parameters). A view's context also declares the
+  # method each of its literal partial renders calls, with the partial's locals.
   class Rbi
     HEADER = <<~RBI
       # typed: true
@@ -39,6 +44,8 @@ module ErbViews
       @types = types
       @helper_proxies = helper_proxies
       @renderers = app.renderers.to_h { |renderer| [renderer.name, renderer] }
+      @sources = {}
+      @partial_locals = {}
     end
 
     def render
@@ -71,9 +78,12 @@ module ErbViews
         body << "  sig { returns(::User) }\n  def current_user; end" if context.authenticated?
       end
       unless component
-        locals(context, file).each do |name|
-          body << "  sig { returns(#{@types.local_type(logical, name)}) }\n  def #{name}; end"
+        if partial_locals(file).nil?
+          locals(context, file).each do |name|
+            body << "  sig { returns(#{@types.local_type(logical, name)}) }\n  def #{name}; end"
+          end
         end
+        body.concat(partial_methods(file, context))
       end
       lines = ["# #{file}"]
       lines << "class ::SorbetViews::Contexts::#{parts.join('::')} < #{superclass}"
@@ -97,6 +107,53 @@ module ErbViews
     def locals(context, file)
       passed = context ? context.calls.flat_map { |call| call.locals.keys } : []
       (passed + @graph.template_facts(file).local_keys).uniq.sort.select { |name| name.match?(/\A[a-z_][a-zA-Z0-9_]*\z/) }
+    end
+
+    def source(file) = @sources[file] ||= File.read(File.join(@app.root, file))
+
+    def partial_locals(file) = @partial_locals.fetch(file) { @partial_locals[file] = PartialLocals.read(source(file)) }
+
+    # The methods a view's literal partial renders call (`render 'row'` calls `__partial__row`), each with the
+    # partial's locals. A name resolves with the prefixes of every renderer that reaches the view, to the partial in
+    # the view's format if there is one. One that resolves to partials with different locals, to a partial without a
+    # locals comment, or that the generator can't resolve (no renderer is known, or the partial isn't an ERB template
+    # in the app) takes any locals. A name that resolves to nothing has no method, so Sorbet reports its render.
+    def partial_methods(file, context)
+      renderers = context ? context.renderers.map { |name| @renderers.fetch(name) } : []
+      names = Code.partial_render_names(Prism.parse(TemplateRuby.call(source(file))).value)
+      names.group_by { |name| Names.partial_method(name) }.sort_by(&:first).filter_map do |method, same|
+        next if method.nil?
+
+        texts = same.flat_map { |name| partial_texts(name, method, renderers, Rbi.format(file)) }.uniq
+        next if texts.empty?
+
+        texts.size == 1 ? texts.first : PartialLocals.untyped_method_rbi(method)
+      end
+    end
+
+    def partial_texts(name, method, renderers, format)
+      prefix_sets = name.include?('/') ? [[]] : renderers.map(&:prefixes).uniq
+      return [PartialLocals.untyped_method_rbi(method)] if prefix_sets.empty?
+
+      logicals = prefix_sets.filter_map { |prefixes| @app.resolve(name, prefixes, partial: true) }.uniq
+      if logicals.empty?
+        return @app.other_partial?(name, prefix_sets) ? [PartialLocals.untyped_method_rbi(method)] : []
+      end
+
+      logicals.flat_map do |logical|
+        files = @app.files(logical)
+        same_format = files.select { |partial| [format, nil].include?(Rbi.format(partial)) }
+        (same_format.empty? ? files : same_format).map do |partial|
+          locals = partial_locals(partial)
+          locals ? locals.method_rbi(method) : PartialLocals.untyped_method_rbi(method)
+        end
+      end
+    end
+
+    # A template's format: `html` for `_row.html.erb`, nil for `_row.erb`.
+    def self.format(file)
+      parts = File.basename(file).split('.')
+      parts.size >= 3 ? parts[-2] : nil
     end
 
     def component_superclass(file)
