@@ -170,9 +170,14 @@ module ErbViews
     def follow?(klass, name)
       return false if name == :render || Code::RESPONDS.include?(name)
 
-      follow_method?(klass.instance_method(name))
-    rescue NameError
-      false
+      @follow ||= {}
+      @follow.fetch([klass, name]) do
+        @follow[[klass, name]] = begin
+          follow_method?(klass.instance_method(name))
+        rescue NameError
+          false
+        end
+      end
     end
 
     def follow_method?(method)
@@ -399,22 +404,12 @@ module ErbViews
         file, line = filter.source_location
         return Code::Facts.empty unless file && File.file?(file)
 
-        block = block_at(file, line)
+        block = Code.blocks_by_line(file)[line]
         block ? Code.scan(block.body, relative(file)) : Code::Facts.empty
       else
         Code::Facts.empty
       end
     end
 
-    def block_at(file, line)
-      stack = [Prism.parse_file(file).value]
-      until stack.empty?
-        node = stack.pop
-        return node if (node.is_a?(Prism::BlockNode) || node.is_a?(Prism::LambdaNode)) && node.location.start_line == line
-
-        stack.concat(node.compact_child_nodes)
-      end
-      nil
-    end
   end
 end

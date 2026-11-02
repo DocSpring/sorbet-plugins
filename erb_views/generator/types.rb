@@ -2,6 +2,7 @@
 
 require 'fileutils'
 require 'open3'
+require 'set'
 require 'tmpdir'
 require_relative 'sorbet_type'
 
@@ -366,17 +367,13 @@ module ErbViews
       output, _status = Open3.capture2e(*command, chdir: @app.root.to_s)
       lines = output.lines
       found = {}
-      used = Hash.new { |hash, place| hash[place] = [] }
+      unmatched = Hash.new { |hash, place| hash[place] = Unmatched.new(positions.fetch(place, [])) }
       lines.each_with_index do |line, index|
         match = REVEALED.match(line) or next
         file = match[1].split('/p/', 2)[1] or next
-        place = [file, match[2].to_i]
-        column = caret_column(lines[index + 1], lines[index + 2])
-        candidates = positions.fetch(place, []).reject { |_, key| used[place].include?(key) }
-        _, key = candidates.find { |col, _| col == column } || candidates.first
+        key = unmatched[[file, match[2].to_i]].take(caret_column(lines[index + 1], lines[index + 2]))
         next if key.nil?
 
-        used[place] << key
         parsed = SorbetType.parse(match[3])
         type = parsed ? SorbetType.widen(parsed) : SorbetType::UNTYPED
         found[key] = found.key?(key) ? SorbetType.union([found[key], type]) : type
@@ -384,6 +381,31 @@ module ErbViews
       raise "Sorbet revealed no types; its output began:\n#{output[0, 2000]}" if found.empty? && positions.any?
 
       found
+    end
+
+    # The reveals at one line of a copy that no report has matched yet: each report takes the first at its column, or
+    # else the line's first. Each lookup skips the ones already taken, so a line with many reveals (every ivar around a
+    # render) takes linear time.
+    class Unmatched
+      # `entries`: [column, key] in the line's order.
+      def initialize(entries)
+        @order = entries.map(&:last)
+        @by_column = entries.group_by(&:first).transform_values { |list| list.map(&:last) }
+        @taken = Set.new
+        @next = 0
+      end
+
+      def take(column)
+        list = @by_column[column]
+        list.shift while list&.any? && @taken.include?(list.first)
+        key = list&.shift
+        if key.nil?
+          @next += 1 while @next < @order.size && @taken.include?(@order[@next])
+          key = @order[@next]
+        end
+        @taken << key unless key.nil?
+        key
+      end
     end
 
     # With ERB_VIEWS_DEBUG set: the reveals Sorbet never reached (code it found unreachable).

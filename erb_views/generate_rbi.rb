@@ -9,18 +9,18 @@
 # It rewrites only the files whose text changes, and deletes the ones for templates that are gone. The test
 # environment checks each render against the same types (generator/runtime_check.rb).
 #
-# The types come from type-checking copies of the app's code (generator/types.rb) with the app's Sorbet binary, the
-# sorbet-static gem's, or SRB_SORBET_EXE (as for `srb`). It must have the erb_views plugin. bin/sorbet-plugin-rbis
-# runs it.
+# The types come from type-checking copies of the app's code (generator/types.rb) with the sorbet-static gem's Sorbet
+# binary, or SRB_SORBET_EXE (as for `srb`). It must have the erb_views plugin. A script that runs it can skip it when
+# nothing it depends on changed (generator/inputs.rb), as the app's bin/sorbet-plugin-rbis does.
 
 require_relative 'generator/app'
+require_relative 'generator/inputs'
 require_relative 'generator/render_graph'
 require_relative 'generator/rbi'
 require_relative 'generator/types'
 
 output = ARGV.fetch(0) { raise 'usage: generate_rbi.rb <output directory>' }
-sorbet = ENV.fetch('SRB_SORBET_EXE') { File.join(Gem::Specification.find_by_name('sorbet-static').gem_dir, 'libexec', 'sorbet') }
-raise "no Sorbet binary at #{sorbet}" unless File.executable?(sorbet)
+sorbet = ErbViews::Inputs.sorbet
 
 Rails.application.eager_load!
 app = ErbViews::App.new(Rails.root)

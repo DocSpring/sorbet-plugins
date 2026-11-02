@@ -358,7 +358,8 @@ module ErbViews
           mine.definite = false
         else
           before = [mine.writes.size, mine.definite]
-          theirs.writes.each { |write| mine.writes << write unless mine.writes.any? { |w| w.key == write.key } }
+          known = mine.writes.to_set(&:key)
+          theirs.writes.each { |write| mine.writes << write if known.add?(write.key) }
           mine.definite &&= theirs.definite
           changed ||= before != [mine.writes.size, mine.definite]
         end
@@ -539,9 +540,12 @@ module ErbViews
     # Only names with a slash: one without resolves with the prefixes of whichever controller renders the view.
     def record_ruby_renders
       Dir.glob(File.join(app.root, '{app,lib}/**/*.rb')).sort.each do |path|
+        source = File.read(path)
+        next unless source.include?('render') # most files: skip parsing them
+
         file = app.relative(path)
         view_code = file.start_with?('app/helpers/', 'app/components/')
-        stack = [[Prism.parse_file(path).value, nil]]
+        stack = [[Prism.parse(source, filepath: path).value, nil]]
         until stack.empty?
           node, scope = stack.pop
           scope = node if node.is_a?(Prism::DefNode)

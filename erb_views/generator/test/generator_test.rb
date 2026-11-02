@@ -17,6 +17,7 @@ require_relative '../names'
 require_relative '../partial_locals'
 require_relative '../sorbet_type'
 require_relative '../template_ruby'
+require_relative '../types'
 
 class SorbetTypeTest < Minitest::Test
   def type(text) = ErbViews::SorbetType.widen(ErbViews::SorbetType.parse(text))
@@ -272,6 +273,26 @@ class IvarHintsTest < Minitest::Test
     error = assert_raises(ArgumentError) { hints('<%# ivars: (template: Template) %>') }
     assert_equal 'x.html.erb: can\'t read "template: Template" in its ivars comment', error.message
     assert_raises(ArgumentError) { hints("<%# ivars: (@a: Integer) %>\n<%# ivars: (@a: String) %>") }
+  end
+end
+
+class UnmatchedRevealsTest < Minitest::Test
+  def test_takes_the_first_at_the_column_then_the_lines_first
+    unmatched = ErbViews::Types::Unmatched.new([[4, :a], [9, :b], [4, :c], [9, :d]])
+    assert_equal :b, unmatched.take(9)
+    assert_equal :a, unmatched.take(nil)
+    assert_equal :c, unmatched.take(4)
+    assert_equal :d, unmatched.take(4) # none left at 4
+    assert_nil unmatched.take(9)
+  end
+
+  def test_a_long_line_takes_linear_time
+    entries = Array.new(20_000) { |i| [i, i] }
+    unmatched = ErbViews::Types::Unmatched.new(entries)
+    started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+    entries.reverse_each { |column, key| assert_equal key, unmatched.take(column) }
+    20_000.times { unmatched.take(nil) }
+    assert_operator Process.clock_gettime(Process::CLOCK_MONOTONIC) - started, :<, 2
   end
 end
 
