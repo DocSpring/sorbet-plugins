@@ -7,11 +7,13 @@
 #   <%# sig { params(template: Template, show_actions: T.nilable(T::Boolean)) } -%>
 #
 # A local every render passes is required, and one that only some pass, or that the partial reads through
-# `local_assigns`, defaults to nil (Rails raises for a local a partial doesn't declare, so the comment declares every
-# one a render may pass). A collection's `_counter` and `_iteration`, which Rails leaves out when a partial doesn't
-# declare them, are declared only if the partial reads them. A local's type is the union of what the renders pass
-# that Sorbet could type, nilable when one leaves it out; the sig leaves out a local no render passes a typed value
-# for. A partial no render in the app reaches gets `locals: ()`.
+# `local_assigns` in a way that allows it to be missing (`local_assigns[:x]`, `fetch(:x, default)`, `key?(:x)`),
+# defaults to nil (Rails raises for a local a partial doesn't declare, so the comment declares every one a render may
+# pass). A collection's `_counter` and `_iteration`, which Rails leaves out when a partial doesn't declare them, are
+# declared only if the partial reads them. A local's type is the union of what the renders pass that Sorbet could
+# type, nilable when it's optional; the sig leaves out a local no render passes a typed value for. A partial no
+# render in the app reaches gets `locals: ()`. Afterwards, read the locals directly instead of through
+# `local_assigns`, which Sorbet types as T.untyped, moving a `fetch` default into the comment.
 #
 # It leaves a partial alone, and lists it, when a gem renders it (an override of Kaminari's or Devise's partials) or
 # no render reaches it but it reads `local_assigns`: write those comments by hand. It also lists optional locals that
@@ -56,6 +58,29 @@ def reads?(program, name)
     stack.concat(node.compact_child_nodes)
   end
   false
+end
+
+# The locals a partial reads through `local_assigns` in a way that allows them to be missing: `local_assigns[:x]`,
+# `fetch(:x, default)`, `fetch(:x) { default }`, `key?(:x)`. (`fetch(:x)` raises without one.)
+def optional_reads(program)
+  found = []
+  stack = [program]
+  until stack.empty?
+    node = stack.pop
+    stack.concat(node.compact_child_nodes)
+    next unless node.is_a?(Prism::CallNode) && node.receiver.is_a?(Prism::CallNode) && node.receiver.name == :local_assigns
+
+    key = node.arguments&.arguments&.first
+    next unless key.is_a?(Prism::SymbolNode)
+
+    optional = case node.name
+               when :[], :key?, :include? then true
+               when :fetch then node.arguments.arguments.size > 1 || !node.block.nil?
+               else false
+               end
+    found << key.unescaped if optional
+  end
+  found
 end
 
 # `<%# ... -%>` lines, wrapped after a comma before 118 columns.
@@ -103,13 +128,19 @@ partials.sort.each do |logical, files|
     passed = calls.flat_map { |call| call.locals.keys }.uniq
     keys = passed.reject { |key| key.match?(IMPLICIT) && !reads?(program, key) } + read_keys
     keys = keys.uniq.select { |key| key.match?(/\A[a-z_][a-zA-Z0-9_]*\z/) }
+    maybe_missing = optional_reads(program)
     required, optional = keys.partition do |key|
-      calls.any? && calls.all? { |call| call.locals.key?(key) && call.locals[key] != ErbViews::RenderGraph::MAYBE }
+      calls.any? && !maybe_missing.include?(key) &&
+        calls.all? { |call| call.locals.key?(key) && call.locals[key] != ErbViews::RenderGraph::MAYBE }
     end
     params = required.sort.map { |key| "#{key}:" } + optional.sort.map { |key| "#{key}: nil" }
     typed = (required.sort + optional.sort).filter_map do |key|
-      type = passed.include?(key) ? types.local_type(logical, key, sig: true) : 'T.untyped'
-      "#{key}: #{strip_root(type)}" unless type == 'T.untyped'
+      type = passed.include?(key) ? strip_root(types.local_type(logical, key, sig: true)) : 'T.untyped'
+      next if type == 'T.untyped'
+
+      # An optional local defaults to nil, though every render that passes it passes a value.
+      type = "T.nilable(#{type})" if optional.include?(key) && !type.start_with?('T.nilable(')
+      "#{key}: #{type}"
     end
 
     header = comment('locals: (', params, ')')

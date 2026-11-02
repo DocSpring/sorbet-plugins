@@ -531,18 +531,21 @@ module ErbViews
       end
     end
 
-    # The partials that Ruby outside the controllers and views renders by name, with the locals it passes: helpers
-    # (`render 'layouts/messages', column:`) and components (`helpers.render('kaminari/nocount_paginator', ...)`).
+    # The partials that Ruby outside the controllers' actions and the views renders by name, with the locals it
+    # passes: helpers (`render 'layouts/messages', column:`), components (`helpers.render('kaminari/nocount_paginator',
+    # ...)`) and a controller's renderer anywhere (`ApplicationController.render(partial: 'templates/example', ...)`).
     # Only names with a slash: one without resolves with the prefixes of whichever controller renders the view.
     def record_ruby_renders
-      Dir.glob(File.join(app.root, '{app/helpers,app/components}/**/*.rb')).sort.each do |path|
+      Dir.glob(File.join(app.root, '{app,lib}/**/*.rb')).sort.each do |path|
         file = app.relative(path)
+        view_code = file.start_with?('app/helpers/', 'app/components/')
         stack = [[Prism.parse_file(path).value, nil]]
         until stack.empty?
           node, scope = stack.pop
           scope = node if node.is_a?(Prism::DefNode)
           stack.concat(node.compact_child_nodes.map { |child| [child, scope] })
-          next unless node.is_a?(Prism::CallNode) && node.name == :render && view_receiver?(node.receiver)
+          next unless node.is_a?(Prism::CallNode) && node.name == :render
+          next unless renderer_receiver?(node.receiver) || (view_code && view_receiver?(node.receiver))
 
           first, options = Code.render_arguments(node)
           name = Code.literal(first || options[:partial])
@@ -553,6 +556,14 @@ module ErbViews
           record_call(render, logical, call_locals(render, first, options, logical))
         end
       end
+    end
+
+    # A controller class's renderer, which renders outside a request: `ApplicationController.render`,
+    # `ApplicationController.renderer.render`, `ApplicationController.renderer.new(...).render`.
+    def renderer_receiver?(node)
+      node = node.receiver if node.is_a?(Prism::CallNode) && node.name == :new
+      node = node.receiver if node.is_a?(Prism::CallNode) && node.name == :renderer
+      (node.is_a?(Prism::ConstantReadNode) || node.is_a?(Prism::ConstantPathNode)) && node.slice.end_with?('Controller')
     end
 
     # self, or a component's `helpers` or `view_context`.
