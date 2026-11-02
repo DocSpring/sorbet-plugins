@@ -1,0 +1,6 @@
+<%# A view under a directory named `mailer` or `*_mailer` has a mailer's helpers. %>
+<p><%= greeting('Ann') %></p>
+<%= current_template %> <%# error: Method `current_template` does not exist on `SorbetViews::AccountMailer::WelcomeHtml` %>
+<%# A name without a `/` is a partial in the view's own directory. %>
+<%= render 'signature', name: 'Ann' %>
+<%= render 'signature', name: 1 %> <%# error: Expected `String` but found `Integer(1)` for argument `name` %>

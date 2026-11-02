@@ -1,8 +1,9 @@
 # frozen_string_literal: true
 
 module ErbViews
-  # The names the plugin gives templates and partials' methods: `classPath`, `camelize` and `partialMethod` in
-  # ErbViews.cc. Keep the two in step: generator/test/generator_test.rb checks the class names against the plugin's.
+  # The names the plugin gives templates, their superclasses and partials' methods: `classPath`, `camelize`,
+  # `mailerView`, `partialName` and `partialMethod` in ErbViews.cc. Keep the two in step: generator/test/
+  # generator_test.rb checks the class and superclass names against the plugin's.
   module Names
     VIEWS_DIR = 'app/views/'
     COMPONENTS_DIR = 'app/components/'
@@ -51,12 +52,48 @@ module ErbViews
       "__partial__#{name.gsub('/', '__')}"
     end
 
-    # `::SorbetViews::Contexts::Templates::ShowHtml` for app/views/templates/show.html.erb, or nil.
-    def context_name(path)
+    # Whether a view gets the mailers' context: one under a directory named `mailer` or `*_mailer`
+    # (`account_mailer/`, `devise/mailer/`), or a layout with `mailer` in its name. `mailerView`.
+    def mailer_view?(relative)
+      *dirs, file = relative.split('/')
+      dirs.any? { |dir| dir == 'mailer' || dir.end_with?('_mailer') } || (dirs.first == 'layouts' && file.include?('mailer'))
+    end
+
+    # The directory a view's `render 'row'` looks in: its own (`templates/show.html.erb` => `templates`), empty at
+    # the top. `viewDir`.
+    def view_dir(relative) = relative.include?('/') ? relative[0...relative.rindex('/')] : ''
+
+    # A partial's name as renders write it: `templates/_row.html.erb` => `templates/row`; nil for a template that
+    # isn't a partial. `partialName`.
+    def partial_name(relative)
+      dir = view_dir(relative)
+      file = dir.empty? ? relative : relative[(dir.size + 1)..]
+      return nil unless file.start_with?('_')
+
+      base = file[1..].split('.', 2).first
+      dir.empty? ? base : "#{dir}/#{base}"
+    end
+
+    # What a literal `render 'row'` in a view names: a name without a `/` is in the view's directory.
+    def resolve_partial(name, relative)
+      dir = view_dir(relative)
+      name.include?('/') || dir.empty? ? name : "#{dir}/#{name}"
+    end
+
+    # The class a template's class inherits: `::SorbetViews::Contexts::Controller` or `::SorbetViews::Contexts::Mailer`
+    # for a view, `::SorbetViews::Contexts::Components::<path>` for a component's template. nil for another file.
+    def superclass_name(path)
       relative, component = template_path(path)
       return nil if relative.nil?
+      return "::SorbetViews::Contexts::#{class_parts(relative, true).join('::')}" if component
 
-      "::SorbetViews::Contexts::#{class_parts(relative, component).join('::')}"
+      "::SorbetViews::Contexts::#{mailer_view?(relative) ? 'Mailer' : 'Controller'}"
+    end
+
+    # `::SorbetViews::Templates::ShowHtml` for app/views/templates/show.html.erb, or nil.
+    def class_name(path)
+      relative, component = template_path(path)
+      relative && "::SorbetViews::#{class_parts(relative, component).join('::')}"
     end
   end
 end

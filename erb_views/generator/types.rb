@@ -29,11 +29,13 @@ module ErbViews
     # SorbetViews, where `Templates::Row` could resolve to a view class instead of the app's.
     def self.qualify(type) = type.gsub(CONSTANT) { |constant| constant == 'T' || constant.start_with?('T::') ? constant : "::#{constant}" }
 
-    # `sorbet`: the Sorbet binary with the erb_views plugin.
-    def initialize(app, graph, sorbet:, log: $stderr)
+    # `sorbet`: the Sorbet binary with the erb_views plugin. `rbi_dir`: where the app's generated RBIs are (relative to
+    # the app), which the passes replace with their own.
+    def initialize(app, graph, sorbet:, rbi_dir:, log: $stderr)
       @app = app
       @graph = graph
       @sorbet = sorbet
+      @rbi_dir = rbi_dir
       @log = log
       @revealed = {}
     end
@@ -359,7 +361,7 @@ module ErbViews
     end
 
     def run(dir, files, positions)
-      ignores = (files + ['sorbet/rbi/plugins/erb_views.rbi']).map { |file| "--ignore=/#{file}" }
+      ignores = (files + [@rbi_dir]).map { |file| "--ignore=/#{file}" }
       command = [@sorbet, '--silence-dev-message', '--allowed-extension=.rb,.rbi,.erb', '--enable-plugin=erb_views', *ignores, dir]
       output, _status = Open3.capture2e(*command, chdir: @app.root.to_s)
       lines = output.lines

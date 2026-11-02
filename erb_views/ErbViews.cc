@@ -11,7 +11,13 @@
 //   after the template's path: `app/views/templates/show.html.erb` is `SorbetViews::Templates::ShowHtml`,
 //   `app/views/templates/_row.html.erb` is `SorbetViews::Templates::RowPartialHtml`, and
 //   `app/components/ds/card_component.html.erb` is `SorbetViews::Components::Ds::CardComponentHtml`.
-//   Its superclass is the template's context, the same path under `SorbetViews::Contexts`.
+// - A view's class inherits `SorbetViews::Contexts::Controller`, a controller's view with its helpers, or for a
+//   mailer's view `SorbetViews::Contexts::Mailer`: a view under a directory named `mailer` or `*_mailer`
+//   (`account_mailer/`, `devise/mailer/`), or a layout with `mailer` in its name. So a new view type-checks before
+//   anything is generated for it. The generator's RBI for the view (sorbet/rbi/erb_views/app/views/...) reopens its
+//   class to add the helpers of the controllers or mailers that render it and its instance variables. A component's
+//   template inherits `SorbetViews::Contexts::Components::<path>`, which the generator declares as the component's
+//   class.
 // - A partial's locals are `__render`'s keyword parameters, from Rails' strict locals comment, typed by a sig comment
 //   (each local without a type is `T.untyped`):
 //
@@ -20,15 +26,21 @@
 //
 //   The transform reads them as `__locals=->(template:, show_actions: false){};` and `sig { params(...) };`, and a
 //   bare `template` in the template reads the local, as in Rails. `locals: ()` declares none.
-// - In a view (not a component's template), a `render` of a literal partial name with literal locals calls a method
-//   named after the partial: `render 'templates/row', template: t` and `render partial: 'templates/row', locals:
-//   { template: t }` call `__partial__templates__row(template: t)`, which the context declares with the partial's
-//   locals as its parameters. So Sorbet checks each local's name and type, and that the partial exists. Other
-//   renders (a name in a variable, `collection:`, a block) stay as they are.
+// - Each partial in app/views declares the method its renders call, in `SorbetViews::Partials`, which every view
+//   includes: `templates/_row.html.erb` defines `__partial__templates__row` with its locals as keyword parameters
+//   (defaults become `T.unsafe(nil)`: they're the partial's business) and its sig comment's types, returning
+//   `T.untyped`. A partial without a locals comment takes any locals (`**locals`). A partial's formats
+//   (`_row.html.erb`, `_row.text.erb`) define the same method, so the generator checks that they declare the same
+//   locals.
+// - In a view (not a component's template), a `render` of a literal partial name with literal locals calls that
+//   method: `render 'templates/row', template: t` and `render partial: 'templates/row', locals: { template: t }`
+//   call `__partial__templates__row(template: t)`. So Sorbet checks each local's name and type, and that the partial
+//   exists. A name without a `/` is the partial in the view's own directory (`render 'row'` in
+//   `templates/show.html.erb` is `templates/_row`). Rails looks it up with the controller's prefixes instead, and
+//   the generator reports a render where the two differ. Other renders (a name in a variable, `collection:`, a
+//   block) stay as they are.
 //
-// generate_rbi.rb writes the contexts from the running app: the view with the helpers of the controllers that
-// render the template (or for a component's template, the component's class), its instance variables and its
-// locals. A template the RBI doesn't have yet (a new one) fails first on its line 1: its context doesn't resolve.
+// generate_rbi.rb writes the RBIs from the running app.
 //
 // Other `.erb` files (config, CI and Docker templates) are `typed: ignore`, and read as empty files if a sigil says
 // otherwise.
@@ -41,6 +53,7 @@
 
 #include "absl/algorithm/container.h"
 #include "absl/strings/match.h"
+#include "absl/strings/str_cat.h"
 #include "absl/strings/str_split.h"
 #include "ast/treemap/treemap.h"
 #include "plugins/Plugin.h"
@@ -118,6 +131,38 @@ vector<string> classPath(string_view relative, bool component) {
         }
     }
     return parts;
+}
+
+// Must match `mailer_view?` in generator/names.rb. Whether a view (relative to app/views) is a mailer's: under a
+// directory named `mailer` or `*_mailer`, or a layout with `mailer` in its name.
+bool mailerView(string_view relative) {
+    vector<string_view> segments = absl::StrSplit(relative, '/');
+    auto file = segments.back();
+    segments.pop_back();
+    for (auto dir : segments) {
+        if (dir == "mailer" || absl::EndsWith(dir, "_mailer")) {
+            return true;
+        }
+    }
+    return !segments.empty() && segments.front() == "layouts" && absl::StrContains(file, "mailer");
+}
+
+// The directory of a view, relative to app/views (empty for one at the top).
+string_view viewDir(string_view relative) {
+    auto slash = relative.rfind('/');
+    return slash == string_view::npos ? string_view() : relative.substr(0, slash);
+}
+
+// A partial's logical name, the way renders name it: `templates/_row.html.erb` => `templates/row`. Nothing for a
+// template that isn't a partial.
+optional<string> partialName(string_view relative) {
+    auto dir = viewDir(relative);
+    auto file = dir.empty() ? relative : relative.substr(dir.size() + 1);
+    if (!absl::StartsWith(file, "_")) {
+        return nullopt;
+    }
+    auto base = file.substr(1, file.find('.') - 1);
+    return dir.empty() ? string(base) : absl::StrCat(dir, "/", base);
 }
 
 void blank(string &out, string_view source, size_t from, size_t to) {
@@ -338,6 +383,48 @@ optional<string> partialMethod(string_view name) {
     return method;
 }
 
+// `module ::SorbetViews::Partials` with the method that renders of this partial call: the locals as keyword
+// parameters, each default as `T.unsafe(nil)` (a default can call the view's helpers, which the module doesn't have),
+// and the sig comment's types. Without a locals comment, it takes any locals.
+ast::ExpressionPtr partialDefinition(core::MutableContext ctx, core::LocOffsets zero, ast::ExpressionPtr partials,
+                                     core::NameRef method, const Locals &locals, const ast::Send::ARGS_store &sigArgs) {
+    ast::MethodDef::PARAMS_store params;
+    ast::Send::ARGS_store types;
+    if (locals.declared) {
+        for (auto &param : locals.params) {
+            if (ast::isa_tree<ast::BlockParam>(param)) {
+                continue;
+            }
+            if (auto optional = ast::cast_tree<ast::OptionalParam>(param)) {
+                params.emplace_back(ast::MK::OptionalParam(optional->loc, optional->expr.deepCopy(),
+                                                           ast::MK::Unsafe(zero, ast::MK::Nil(zero))));
+            } else {
+                params.emplace_back(param.deepCopy());
+            }
+        }
+        // The types of the locals, without the names that aren't locals, which `__render`'s sig reports.
+        for (size_t i = 0; i + 1 < sigArgs.size(); i += 2) {
+            auto key = ast::cast_tree<ast::Literal>(sigArgs[i]);
+            auto local = key != nullptr && key->isSymbol() && absl::c_any_of(locals.params, [&](auto &param) {
+                             return !ast::isa_tree<ast::BlockParam>(param) && ast::MK::arg2Name(param) == key->asSymbol();
+                         });
+            if (local) {
+                types.emplace_back(sigArgs[i].deepCopy());
+                types.emplace_back(sigArgs[i + 1].deepCopy());
+            }
+        }
+    } else {
+        auto name = ctx.state.enterNameUTF8("locals");
+        params.emplace_back(ast::MK::RestParam(zero, ast::MK::KeywordArg(zero, name)));
+        types.emplace_back(ast::MK::Symbol(zero, name));
+        types.emplace_back(ast::MK::Untyped(zero));
+    }
+    ast::ClassDef::RHS_store body;
+    body.emplace_back(ast::MK::Sig(zero, move(types), ast::MK::Untyped(zero)));
+    body.emplace_back(ast::MK::SyntheticMethod(zero, zero, method, move(params), ast::MK::EmptyTree()));
+    return ast::MK::Module(zero, zero, move(partials), move(body));
+}
+
 // Reads of a partial's locals. Rails makes them the parameters of the template's method, so a bare `title` in the
 // template reads the local, but the comment's lambda doesn't put them in the body's scope and Ruby parses each read as
 // a call (`self.title`). Turns those calls back into local reads: no receiver written, no arguments or parentheses.
@@ -357,9 +444,11 @@ public:
     }
 };
 
-// Turns each render of a literal partial with literal locals into a call to the partial's method.
+// Turns each render of a literal partial with literal locals into a call to the partial's method. A name without a
+// `/` is in the view's directory.
 class PartialRenders {
     core::NameRef render, partial, locals;
+    string_view dir;
 
     static optional<string_view> literalString(core::MutableContext ctx, const ast::ExpressionPtr &expr) {
         auto literal = ast::cast_tree<ast::Literal>(expr);
@@ -389,9 +478,9 @@ class PartialRenders {
     }
 
 public:
-    explicit PartialRenders(core::MutableContext ctx)
+    PartialRenders(core::MutableContext ctx, string_view dir)
         : render(ctx.state.enterNameUTF8("render")), partial(ctx.state.enterNameUTF8("partial")),
-          locals(ctx.state.enterNameUTF8("locals")) {}
+          locals(ctx.state.enterNameUTF8("locals")), dir(dir) {}
 
     void postTransformSend(core::MutableContext ctx, ast::ExpressionPtr &tree) {
         auto &send = ast::cast_tree_nonnull<ast::Send>(tree);
@@ -433,7 +522,8 @@ public:
         } else {
             return;
         }
-        auto method = partialMethod(*name);
+        auto method = absl::StrContains(*name, '/') || dir.empty() ? partialMethod(*name)
+                                                                     : partialMethod(absl::StrCat(dir, "/", *name));
         if (!method.has_value()) {
             return;
         }
@@ -507,35 +597,49 @@ public:
             LocalReads localReads(names);
             ast::TreeWalk::apply(ctx, localReads, code);
         }
-        if (!found->second) {
-            PartialRenders partialRenders(ctx);
+        auto [relative, component] = *found;
+        if (!component) {
+            PartialRenders partialRenders(ctx, viewDir(relative));
             ast::TreeWalk::apply(ctx, partialRenders, code);
         }
 
-        ast::ClassDef::RHS_store classBody;
-        // What a template returns is its output, which nothing here checks: an implied `sig { void }`, so templates
-        // pass at `typed: strict`.
-        classBody.emplace_back(ast::MK::SigVoid(zero, sigParams(ctx, locals)));
-        classBody.emplace_back(
-            ast::MK::Method(loc, zero, ctx.state.enterNameUTF8("__render"), move(locals.params), move(code)));
-
-        // `::SorbetViews[::Contexts]::<parts>`, at the template's first byte (where Sorbet reports a context that
-        // doesn't resolve).
-        auto parts = classPath(found->first, found->second);
-        auto constant = [&](bool context) {
+        // `::SorbetViews::<parts>`, at the template's first byte (where Sorbet reports a constant that doesn't
+        // resolve).
+        auto constant = [&](const vector<string> &parts) {
             auto name = ast::MK::Constant(zero, core::Symbols::root());
             name = ast::MK::UnresolvedConstant(zero, move(name), ctx.state.enterNameConstant("SorbetViews"));
-            if (context) {
-                name = ast::MK::UnresolvedConstant(zero, move(name), ctx.state.enterNameConstant("Contexts"));
-            }
             for (auto &part : parts) {
                 name = ast::MK::UnresolvedConstant(zero, move(name), ctx.state.enterNameConstant(part));
             }
             return name;
         };
+
+        auto sigArgs = sigParams(ctx, locals);
+        auto partial = component ? nullopt : partialName(relative);
+        if (partial.has_value()) {
+            if (auto method = partialMethod(*partial)) {
+                classDef.rhs.emplace_back(partialDefinition(ctx, zero, constant({"Partials"}),
+                                                            ctx.state.enterNameUTF8(*method), locals, sigArgs));
+            }
+        }
+
+        ast::ClassDef::RHS_store classBody;
+        // What a template returns is its output, which nothing here checks: an implied `sig { void }`, so templates
+        // pass at `typed: strict`.
+        classBody.emplace_back(ast::MK::SigVoid(zero, move(sigArgs)));
+        classBody.emplace_back(
+            ast::MK::Method(loc, zero, ctx.state.enterNameUTF8("__render"), move(locals.params), move(code)));
+
+        auto parts = classPath(relative, component);
+        vector<string> context{"Contexts"};
+        if (component) {
+            context.insert(context.end(), parts.begin(), parts.end());
+        } else {
+            context.emplace_back(mailerView(relative) ? "Mailer" : "Controller");
+        }
         ast::ClassDef::ANCESTORS_store ancestors;
-        ancestors.emplace_back(constant(true));
-        classDef.rhs.emplace_back(ast::MK::Class(loc, zero, constant(false), move(ancestors), move(classBody)));
+        ancestors.emplace_back(constant(context));
+        classDef.rhs.emplace_back(ast::MK::Class(loc, zero, constant(parts), move(ancestors), move(classBody)));
     }
 };
 

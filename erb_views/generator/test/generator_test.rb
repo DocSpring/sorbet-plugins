@@ -297,6 +297,23 @@ class PartialRendersTest < Minitest::Test
     assert_equal '__partial__templates__row', ErbViews::Names.partial_method('templates/row')
     [%w[/a a/ a//b a.html a-b] + ['']].flatten.each { |name| assert_nil ErbViews::Names.partial_method(name), name }
   end
+
+  def test_partial_names
+    assert_equal 'templates/row', ErbViews::Names.partial_name('templates/_row.html.erb')
+    assert_equal 'a/b/row', ErbViews::Names.partial_name('a/b/_row.text.erb')
+    assert_equal 'row', ErbViews::Names.partial_name('_row.html.erb')
+    assert_nil ErbViews::Names.partial_name('templates/show.html.erb')
+    assert_equal 'templates/row', ErbViews::Names.resolve_partial('row', 'templates/show.html.erb')
+    assert_equal 'shared/row', ErbViews::Names.resolve_partial('shared/row', 'templates/show.html.erb')
+    assert_equal 'row', ErbViews::Names.resolve_partial('row', 'show.html.erb')
+  end
+
+  def test_mailer_views
+    %w[account_mailer/welcome.html.erb devise/mailer/reset.html.erb mailer/a.text.erb layouts/mailer.html.erb
+       layouts/account_mailer.text.erb a/b_mailer/_part.html.erb].each { |path| assert ErbViews::Names.mailer_view?(path), path }
+    %w[templates/show.html.erb mailers.html.erb mailer.html.erb layouts/application.html.erb templates/mailer_list.html.erb
+       mailer_x/a.html.erb].each { |path| refute ErbViews::Names.mailer_view?(path), path }
+  end
 end
 
 # The generator's copies of the plugin's transform and class names, against the plugin, for every fixture template.
@@ -325,11 +342,22 @@ class PluginConformanceTest < Minitest::Test
   def test_class_names_match_the_plugin
     out, _err, _status = sorbet('--print=symbol-table', '--quiet', 'stubs.rbi', *@templates)
     @templates.each do |template|
-      relative, component = ErbViews::Names.template_path(template)
-      next if relative.nil?
+      name = ErbViews::Names.class_name(template)
+      next if name.nil?
 
-      name = "::SorbetViews::#{ErbViews::Names.class_parts(relative, component).join('::')}"
-      assert_includes out, "class #{name} < ", template
+      assert_includes out, "class #{name} < #{ErbViews::Names.superclass_name(template)} ", template
     end
+  end
+
+  # Each partial's method, from the partial's own file.
+  def test_partial_methods_match_the_plugin
+    out, _err, _status = sorbet('--print=symbol-table', '--quiet', 'stubs.rbi', *@templates)
+    partials = @templates.filter_map do |template|
+      relative, component = ErbViews::Names.template_path(template)
+      name = !component && relative && ErbViews::Names.partial_name(relative)
+      name && ErbViews::Names.partial_method(name)
+    end
+    refute_empty partials
+    partials.uniq.each { |method| assert_match(/method ::SorbetViews::Partials##{method} /, out) }
   end
 end
