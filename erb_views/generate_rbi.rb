@@ -3,18 +3,19 @@
 # Writes the RBI that the erb_views Sorbet plugin's template classes inherit: a context per template, with the view's
 # helpers, the instance variables its actions assign (and their types) and its locals. Run it inside the app:
 #
-#   RAILS_ENV=development bin/rails runner path/to/generate_rbi.rb sorbet/rbi/plugins/erb_views.rbi path/to/sorbet
+#   RAILS_ENV=development bin/rails runner path/to/generate_rbi.rb sorbet/rbi/plugins/erb_views.rbi
 #
-# The Sorbet binary must have the erb_views plugin: the types come from type-checking copies of the app's code
-# (generator/types.rb). bin/sorbet-plugin-rbis runs it.
+# The types come from type-checking copies of the app's code (generator/types.rb) with the app's Sorbet binary, the
+# sorbet-static gem's, or SRB_SORBET_EXE (as for `srb`). It must have the erb_views plugin. bin/sorbet-plugin-rbis
+# runs it.
 
 require_relative 'generator/app'
 require_relative 'generator/render_graph'
 require_relative 'generator/rbi'
 require_relative 'generator/types'
 
-output, sorbet = ARGV
-raise 'usage: generate_rbi.rb <output.rbi> <sorbet binary>' if output.nil? || sorbet.nil?
+output = ARGV.fetch(0) { raise 'usage: generate_rbi.rb <output.rbi>' }
+sorbet = ENV.fetch('SRB_SORBET_EXE') { File.join(Gem::Specification.find_by_name('sorbet-static').gem_dir, 'libexec', 'sorbet') }
 raise "no Sorbet binary at #{sorbet}" unless File.executable?(sorbet)
 
 Rails.application.eager_load!

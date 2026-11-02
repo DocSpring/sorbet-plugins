@@ -7,7 +7,8 @@
 # A fixture is `<plugin>/test/**/*.rb` or `*.erb` (paths matter to the rspec and erb_views plugins), checked together with the `.rbi` stubs in the same directory, with
 # `--enable-plugin=<plugin>`. Mark each expected error on its line with `# error: <part of the message>` (several
 # per line are fine; in a template, `<%# error: ... %>`). Any error without a marker, and any marker without an error,
-# fails the fixture. A `# sorbet-args: ...` line adds flags (more plugins, `--enable-experimental-rspec`).
+# fails the fixture. A `# sorbet-args: ...` line adds flags (more plugins, `--enable-experimental-rspec`). Then it runs
+# each plugin's generator tests, if it has any.
 
 require 'open3'
 require 'shellwords'
@@ -72,4 +73,10 @@ plugins.each do |plugin|
 end
 
 puts "#{fixtures} fixtures, #{failures} failed"
-exit(failures.zero? ? 0 : 1)
+
+# A generator's own tests (`<plugin>/generator/test/*_test.rb`), for the parts that don't need an app.
+test_failures = plugins.flat_map { |plugin| Dir.glob(File.join(root, plugin, 'generator', 'test', '*_test.rb')).sort }.count do |test|
+  puts "Running #{test.delete_prefix("#{root}/")}"
+  !system(RbConfig.ruby, test)
+end
+exit(failures.zero? && test_failures.zero? ? 0 : 1)

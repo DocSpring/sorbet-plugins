@@ -66,3 +66,6 @@ Each plugin's `test/` has fixtures with `# error:` markers, checked against a So
 ```sh
 ruby test/run_tests.rb ../sorbet/bazel-bin/main/sorbet
 ```
+
+It also runs a generator's own tests (`<plugin>/generator/test/*_test.rb`, Minitest), for the parts that don't need
+an app.
