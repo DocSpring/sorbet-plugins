@@ -108,6 +108,12 @@ class CodeTest < Minitest::Test
     assert_equal Set[:ends], outcomes("def a\n  return head(:not_found) unless x\n  render :a\nend")
   end
 
+  def test_a_return_after_performed_ends
+    assert_equal Set[:ends, :continue], outcomes("def a\n  load_report\n  return if performed?\n  @b = 1\nend")
+    node = method_node("def a\n  return if performed?\n  return unless x\n  @b = 1\nend")
+    assert_equal [3], ErbViews::Code.returns(node).map { |exit| exit.location.start_line } # not `return if performed?`
+  end
+
   def test_self_calls_use_the_callees_outcomes
     assert_equal Set[:ends], outcomes("def a\n  render_page(:a)\nend", ends: [:render_page])
     assert_equal Set[:continue], outcomes("def a\n  helper\nend")
@@ -171,6 +177,50 @@ class CodeTest < Minitest::Test
     RUBY
     assert_equal({ '@a' => true, '@b' => false, '@c' => false }, facts.writes.to_h { |write| [write.name, write.definite] })
     refute facts.renders.first.definite
+  end
+
+  def test_scan_records_the_writes_on_every_path_to_a_render
+    facts = ErbViews::Code.scan(method_node(<<~RUBY).body, 'app/controllers/a.rb')
+      def index
+        @a = 1
+        @b = 2 if x
+        respond_to do |format|
+          format.html do
+            @c = 3
+            render :index
+          end
+          format.csv { render :csv }
+        end
+        if y
+          @d = 4
+        else
+          render :empty
+        end
+        case z
+        when 1 then @e = 5
+        else render :other
+        end
+        begin
+          @f = 6
+          render :body
+        rescue StandardError
+          render :rescued
+        else
+          render :finished
+        ensure
+          @g = 7
+        end
+        render :last
+      end
+    RUBY
+    dominating = facts.renders.to_h { |render| [render.node.arguments.arguments.first.unescaped, render.dominating.to_a.sort] }
+    assert_equal(
+      {
+        'index' => %w[@a @c], 'csv' => %w[@a], 'empty' => %w[@a], 'other' => %w[@a], 'body' => %w[@a @f],
+        'rescued' => %w[@a], 'finished' => %w[@a @f], 'last' => %w[@a @g],
+      },
+      dominating
+    )
   end
 end
 

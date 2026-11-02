@@ -37,8 +37,9 @@ module ErbViews
     # redirects) has the type it has at the end of the last callback that uses it.
     #
     # An `:after` handoff's `exits` are the method's `return`s that don't end the response: its default template
-    # renders there too, or a callback's chain carries on from there.
-    Handoff = Struct.new(:file, :node, :kind, :outer, :inner, :callbacks, :own_writes, :exits) do
+    # renders there too, or a callback's chain carries on from there. A render's `dominating` are the ivars its method
+    # assigns on every path to it (Code::Render).
+    Handoff = Struct.new(:file, :node, :kind, :outer, :inner, :callbacks, :own_writes, :exits, :dominating) do
       def key = [file, kind, node && [node.location.start_offset, node.location.end_offset]]
       def origin_key = [key, outer&.key, callbacks&.map { |handoff, _| handoff.key }]
     end
@@ -398,9 +399,10 @@ module ErbViews
 
     def render_handoff(render)
       call = render.via&.first
-      return Handoff.new(render.file, render.node, :wrap) if call.nil?
+      dominating = render.dominating || Set.new
+      return Handoff.new(render.file, render.node, :wrap, nil, nil, nil, nil, nil, dominating) if call.nil?
 
-      Handoff.new(render.file, render.node, :wrap, Handoff.new(call.file, call.node, :wrap), render.chain_writes)
+      Handoff.new(render.file, render.node, :wrap, Handoff.new(call.file, call.node, :wrap), render.chain_writes, nil, nil, nil, dominating)
     end
 
     def layout_option(renderer, options)

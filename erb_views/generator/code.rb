@@ -14,7 +14,9 @@ module ErbViews
     # `bindings`: when the render is in a method the graph followed from a call, the method's parameters =>
     # [the call's argument, the caller's scope] (`render template` in `render_page(:new, 'Title')`). `via`: the
     # SelfCalls that lead to it, outermost first, and `chain_writes`: the ivars the outermost call's method assigns.
-    Render = Struct.new(:file, :node, :scope, :definite, :bindings, :via, :chain_writes, keyword_init: true)
+    # `dominating`: the ivars its own method assigns on every path to it, so a write and a render in the same block
+    # (`format.html { @rows = load_rows; render :index }`) hand over a value even though the block may not run.
+    Render = Struct.new(:file, :node, :scope, :definite, :bindings, :via, :chain_writes, :dominating, keyword_init: true)
     # A call that ends the response (`redirect_to`, `head`, `send_data`...), so no template renders after it.
     Respond = Struct.new(:name, :definite, keyword_init: true)
 
@@ -38,6 +40,7 @@ module ErbViews
         @file = file
         @facts = Facts.empty
         @definite = true
+        @dominating = Set.new
       end
 
       def scan(node)
@@ -61,36 +64,29 @@ module ErbViews
         @definite = parent
       end
 
+      # Each branch on its own: a write in one doesn't reach a render in another.
       def visit_if_node(node)
         visit(node.predicate)
-        conditional do
-          visit(node.statements)
-          visit(node.subsequent)
-        end
+        conditional { visit(node.statements) }
+        conditional { visit(node.subsequent) }
       end
 
       def visit_unless_node(node)
         visit(node.predicate)
-        conditional do
-          visit(node.statements)
-          visit(node.else_clause)
-        end
+        conditional { visit(node.statements) }
+        conditional { visit(node.else_clause) }
       end
 
       def visit_case_node(node)
         visit(node.predicate)
-        conditional do
-          node.conditions.each { |condition| visit(condition) }
-          visit(node.else_clause)
-        end
+        node.conditions.each { |condition| conditional { visit(condition) } }
+        conditional { visit(node.else_clause) }
       end
 
       def visit_case_match_node(node)
         visit(node.predicate)
-        conditional do
-          node.conditions.each { |condition| visit(condition) }
-          visit(node.else_clause)
-        end
+        node.conditions.each { |condition| conditional { visit(condition) } }
+        conditional { visit(node.else_clause) }
       end
 
       def visit_and_node(node)
@@ -121,8 +117,32 @@ module ErbViews
       def visit_block_node(node) = conditional { super }
       def visit_rescue_node(node) = conditional { super }
       def visit_rescue_modifier_node(node)
+        before = @dominating.dup
         visit(node.expression)
-        conditional { visit(node.rescue_expression) }
+        conditional do
+          @dominating = before # the expression may have raised before its writes
+          visit(node.rescue_expression)
+        end
+      end
+
+      # A rescue clause can start before any of the body's writes, and an `else` clause runs only when the body
+      # didn't raise. An `ensure` clause always runs, after a body that may have raised anywhere.
+      def visit_begin_node(node)
+        before = @dominating.dup
+        visit(node.statements)
+        finished = @dominating
+        if node.rescue_clause
+          @dominating = before.dup
+          visit(node.rescue_clause)
+          conditional do
+            @dominating = finished.dup
+            visit(node.else_clause)
+          end
+          finished = before
+        end
+        @dominating = before.dup
+        visit(node.ensure_clause)
+        @dominating |= finished
       end
 
       # `super` runs the ancestor's method: a self call the render graph resolves from the method it's in.
@@ -139,16 +159,19 @@ module ErbViews
       def visit_instance_variable_write_node(node)
         write(node.name, node, node.value)
         super
+        @dominating << node.name.to_s
       end
 
       def visit_instance_variable_or_write_node(node)
         write(node.name, node, node.value)
         super
+        @dominating << node.name.to_s
       end
 
       def visit_instance_variable_operator_write_node(node)
         write(node.name, node, nil)
         super
+        @dominating << node.name.to_s
       end
 
       def visit_instance_variable_and_write_node(node)
@@ -160,6 +183,7 @@ module ErbViews
       def visit_instance_variable_target_node(node)
         write(node.name, node, nil) # `@a, @b = ...`
         super
+        @dominating << node.name.to_s
       end
 
       def visit_call_node(node)
@@ -170,10 +194,13 @@ module ErbViews
         if node.receiver.nil? || node.receiver.is_a?(Prism::SelfNode)
           case node.name
           when :render
-            @facts.renders << Render.new(file: @file, node:, scope: @scope, definite: @definite)
+            @facts.renders << Render.new(file: @file, node:, scope: @scope, definite: @definite, dominating: @dominating.dup)
           when :instance_variable_set
             name = node.arguments&.arguments&.first
-            write(name.unescaped.to_sym, node, node.arguments.arguments[1]) if name.is_a?(Prism::SymbolNode)
+            if name.is_a?(Prism::SymbolNode)
+              write(name.unescaped.to_sym, node, node.arguments.arguments[1])
+              @dominating << name.unescaped
+            end
           when *RESPONDS
             @facts.responds << Respond.new(name: node.name, definite: @definite)
           end
@@ -193,12 +220,16 @@ module ErbViews
         @facts.writes << IvarWrite.new(name: name.to_s, file: @file, node:, value:, definite: @definite)
       end
 
+      # Code that may not run: its writes aren't definite, and don't dominate what comes after it.
       def conditional
         definite = @definite
+        dominating = @dominating
         @definite = false
+        @dominating = dominating.dup
         yield
       ensure
         @definite = definite
+        @dominating = dominating
       end
 
       def exits?(node)
@@ -233,13 +264,22 @@ module ErbViews
       found
     end
 
-    # The `return`s in a method's body (not in a block, a lambda or another method).
+    # The `return`s in a method's body (not in a block, a lambda or another method), except `return if performed?`'s:
+    # the action rendered or redirected, so nothing more renders after it.
     def returns(node, found = [])
       found << node if node.is_a?(Prism::ReturnNode)
       node.compact_child_nodes.each do |child|
-        returns(child, found) unless child.is_a?(Prism::DefNode) || child.is_a?(Prism::BlockNode) || child.is_a?(Prism::LambdaNode)
+        next if child.is_a?(Prism::DefNode) || child.is_a?(Prism::BlockNode) || child.is_a?(Prism::LambdaNode)
+        next if node.is_a?(Prism::IfNode) && child.equal?(node.statements) && performed?(node.predicate)
+
+        returns(child, found)
       end
       found
+    end
+
+    # `performed?`: whether the action has rendered or redirected.
+    def performed?(node)
+      node.is_a?(Prism::CallNode) && node.name == :performed? && (node.receiver.nil? || node.receiver.is_a?(Prism::SelfNode))
     end
 
     # The instance variables a method reads or assigns.
@@ -264,7 +304,11 @@ module ErbViews
         node.rescue_clause ? found | outcomes(node.rescue_clause.statements, &self_call) : found
       when Prism::ParenthesesNode then outcomes(node.body, &self_call)
       when Prism::IfNode
-        either(node.statements, node.subsequent.is_a?(Prism::ElseNode) ? node.subsequent.statements : node.subsequent, &self_call)
+        subsequent = node.subsequent.is_a?(Prism::ElseNode) ? node.subsequent.statements : node.subsequent
+        found = node.statements ? outcomes(node.statements, &self_call) : CONTINUES
+        # `return if performed?` returns after a render or a redirect.
+        found = found.to_set { |outcome| outcome == :returns ? :ends : outcome } if performed?(node.predicate)
+        found | (subsequent ? outcomes(subsequent, &self_call) : CONTINUES)
       when Prism::UnlessNode then either(node.statements, node.else_clause&.statements, &self_call)
       when Prism::CaseNode, Prism::CaseMatchNode
         branches = node.conditions.map { |branch| branch.statements } + [node.else_clause&.statements]

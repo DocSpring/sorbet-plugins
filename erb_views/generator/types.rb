@@ -113,14 +113,14 @@ module ErbViews
     def render(type) = Types.qualify(SorbetType.render(type))
 
     # The narrower of Sorbet's type at the handoff and the union of the ivar's assignments that reach it (nilable
-    # when one may not run). Sorbet knows the flow inside the method (`return unless @record`), but an ivar the method
+    # when one may not run, unless one runs on every path to the render: the same block's). Sorbet knows the flow inside the method (`return unless @record`), but an ivar the method
     # doesn't assign has the type the whole class declares: nilable when one action's callbacks don't set it, and
     # nilable for one a method the action calls sets. The assignments know which ones run before this handoff.
     def handoff_type(handoff, name, ivar)
       place = handoff&.outer && !handoff.inner.include?(name) ? handoff.outer : handoff
       types = ivar.writes.filter_map { |write| write_type(write) }
       assigned = if types.empty? then nil
-                 elsif ivar.definite then SorbetType.union(types)
+                 elsif ivar.definite || handoff&.dominating&.include?(name) then SorbetType.union(types)
                  else SorbetType.union(types + [NIL])
                  end
       callback = handoff && last_callback(handoff, name)
