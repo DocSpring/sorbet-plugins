@@ -73,16 +73,26 @@ module ErbViews
     # An ivar in a template's context: what it is at each handoff into the template (nil where it isn't set), and
     # what the template assigns.
     def ivar_type(logical, file, name)
-      context = @graph.contexts.key?(logical) ? @graph.contexts[logical] : nil
-      types = (context&.origins || {}).values.map do |handoff, env|
-        env.key?(name) ? handoff_type(handoff, name, env.fetch(name)) : NIL
-      end
+      types = arrival_types(logical, name)
       own = @graph.template_facts(file).writes.select { |write| write.name == name }.filter_map { |write| write_type(write) }
       types << NIL if types.empty? && own.any?
       types.concat(own)
       return 'T.untyped' if types.empty?
 
       render(SorbetType.union(types))
+    end
+
+    # What an ivar is where the template's renderers hand over to it (a SorbetType), or nil when none does.
+    def ivar_arrival(logical, name)
+      types = arrival_types(logical, name)
+      types.empty? ? nil : SorbetType.union(types)
+    end
+
+    def arrival_types(logical, name)
+      context = @graph.contexts.key?(logical) ? @graph.contexts[logical] : nil
+      (context&.origins || {}).values.map do |handoff, env|
+        env.key?(name) ? handoff_type(handoff, name, env.fetch(name)) : NIL
+      end
     end
 
     # The union of what every caller passes; a caller that leaves the local out makes it nilable. For a partial's sig
@@ -136,7 +146,16 @@ module ErbViews
       return SorbetType::UNTYPED if write.node.is_a?(Prism::InstanceVariableTargetNode) # `@a, @b = pair`
       return nil if write.value.nil?
 
-      @revealed.fetch(value_key(write.file, write.value), SorbetType::UNTYPED)
+      revealed = @revealed.fetch(value_key(write.file, write.value), SorbetType::UNTYPED)
+      revealed == SorbetType::UNTYPED ? let_type(write.value) || revealed : revealed
+    end
+
+    # The type a `T.let` declares, for a value Sorbet can't type (`@plans = T.let(load_plans, T::Array[Plan])`).
+    def let_type(node)
+      return nil unless node.is_a?(Prism::CallNode) && node.name == :let && node.receiver&.slice == 'T'
+
+      type = node.arguments&.arguments&.[](1)
+      type && SorbetType.parse(type.slice)
     end
 
     def value_type(file, value)
@@ -144,7 +163,9 @@ module ErbViews
       when nil, RenderGraph::MAYBE then SorbetType::UNTYPED
       when RenderGraph::Known then SorbetType.parse(value.type)
       when RenderGraph::Element then SorbetType.element(@revealed.fetch(value_key(file, value.node), SorbetType::UNTYPED))
-      else @revealed.fetch(value_key(file, value), SorbetType::UNTYPED)
+      else
+        revealed = @revealed.fetch(value_key(file, value), SorbetType::UNTYPED)
+        revealed == SorbetType::UNTYPED ? let_type(value) || revealed : revealed
       end
     end
 
@@ -187,7 +208,7 @@ module ErbViews
 
     # `@stats = T.let(Stats.for(key), T.nilable(T::Hash[String, Integer]))` declares the ivar nilable for the
     # actions that don't set it, and Sorbet then types it as declared. The copy assigns `(Stats.for(key))`, so the
-    # type at the handoff is what this action assigns.
+    # type at the handoff is what this action assigns (or the `T.let`'s type when Sorbet can't type the value).
     def unwrap_let(node)
       return [] unless node.is_a?(Prism::CallNode) && node.name == :let && node.receiver&.slice == 'T'
 

@@ -3,18 +3,25 @@
 # Writes the RBI that the erb_views Sorbet plugin's template classes inherit: a context per template, with the view's
 # helpers, the instance variables its actions assign (and their types) and its locals. Run it inside the app:
 #
-#   RAILS_ENV=development bin/rails runner path/to/generate_rbi.rb sorbet/rbi/plugins/erb_views.rbi
+#   RAILS_ENV=development bin/rails runner path/to/generate_rbi.rb [--runtime-check=<file.rb>] \
+#     sorbet/rbi/plugins/erb_views.rbi
+#
+# --runtime-check also writes a file for the test environment to load, which checks each render's ivars and locals
+# against the same types (generator/runtime_check.rb).
 #
 # The types come from type-checking copies of the app's code (generator/types.rb) with the app's Sorbet binary, the
 # sorbet-static gem's, or SRB_SORBET_EXE (as for `srb`). It must have the erb_views plugin. bin/sorbet-plugin-rbis
 # runs it.
 
+require 'fileutils'
 require_relative 'generator/app'
 require_relative 'generator/render_graph'
 require_relative 'generator/rbi'
 require_relative 'generator/types'
 
-output = ARGV.fetch(0) { raise 'usage: generate_rbi.rb <output.rbi>' }
+runtime_check = ARGV.find { |arg| arg.start_with?('--runtime-check=') }
+ARGV.delete(runtime_check)
+output = ARGV.fetch(0) { raise 'usage: generate_rbi.rb [--runtime-check=<file.rb>] <output.rbi>' }
 sorbet = ENV.fetch('SRB_SORBET_EXE') { File.join(Gem::Specification.find_by_name('sorbet-static').gem_dir, 'libexec', 'sorbet') }
 raise "no Sorbet binary at #{sorbet}" unless File.executable?(sorbet)
 
@@ -32,3 +39,11 @@ end
 rbi = ErbViews::Rbi.new(app, graph, types, helper_proxies:)
 types.infer! { rbi.render }
 File.write(output, rbi.render)
+if runtime_check
+  path = runtime_check.delete_prefix('--runtime-check=')
+  FileUtils.mkdir_p(File.dirname(path))
+  File.write(path, rbi.runtime_check)
+end
+# A declaration its renderers contradict is wrong, or hides a bug: fail, with the RBI written.
+conflicts = rbi.hint_conflicts
+abort conflicts.map { |conflict| "erb_views: #{conflict}" }.join("\n") unless conflicts.empty?

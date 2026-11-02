@@ -12,6 +12,7 @@ require 'minitest/autorun'
 require 'set'
 require 'open3'
 require_relative '../code'
+require_relative '../ivar_hints'
 require_relative '../names'
 require_relative '../partial_locals'
 require_relative '../sorbet_type'
@@ -205,6 +206,22 @@ class PartialLocalsTest < Minitest::Test
 
   def test_only_the_first_locals_comment_counts
     assert_equal ['a'], locals("<%# locals: (a:) %>\n<%# locals: (b:) %>\n").names
+  end
+end
+
+class IvarHintsTest < Minitest::Test
+  def hints(source) = ErbViews::IvarHints.read(source, 'x.html.erb')
+
+  def test_reads_each_declaration
+    assert_equal({ '@template' => 'Template', '@pairs' => 'T::Hash[String, [Integer, String]]', '@token' => 'T.nilable(ApiToken)' },
+                 hints("<%# ivars: (@template: Template, @pairs: T::Hash[String, [Integer, String]],\n  @token: T.nilable(ApiToken)) -%>\n"))
+    assert_equal({}, hints("<%# ivars are set by the controller %>\n"))
+  end
+
+  def test_refuses_what_it_cannot_read
+    error = assert_raises(ArgumentError) { hints('<%# ivars: (template: Template) %>') }
+    assert_equal 'x.html.erb: can\'t read "template: Template" in its ivars comment', error.message
+    assert_raises(ArgumentError) { hints("<%# ivars: (@a: Integer) %>\n<%# ivars: (@a: String) %>") }
   end
 end
 
