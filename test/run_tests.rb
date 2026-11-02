@@ -4,10 +4,10 @@
 #
 #   ruby test/run_tests.rb path/to/sorbet [plugin ...]
 #
-# A fixture is `<plugin>/test/**/*.rb` (paths matter to the rspec plugin), checked together with the `.rbi` stubs in the same directory, with
+# A fixture is `<plugin>/test/**/*.rb` or `*.erb` (paths matter to the rspec and erb_views plugins), checked together with the `.rbi` stubs in the same directory, with
 # `--enable-plugin=<plugin>`. Mark each expected error on its line with `# error: <part of the message>` (several
-# per line are fine). Any error without a marker, and any marker without an error, fails the fixture. A
-# `# sorbet-args: ...` line adds flags (more plugins, `--enable-experimental-rspec`).
+# per line are fine; in a template, `<%# error: ... %>`). Any error without a marker, and any marker without an error,
+# fails the fixture. A `# sorbet-args: ...` line adds flags (more plugins, `--enable-experimental-rspec`).
 
 require 'open3'
 require 'shellwords'
@@ -24,13 +24,13 @@ fixtures = 0
 plugins.each do |plugin|
   test_dir = File.join(root, plugin, 'test')
   stubs = Dir.glob(File.join(test_dir, '*.rbi')).sort
-  Dir.glob(File.join(test_dir, '**', '*.rb')).sort.each do |fixture|
+  Dir.glob(File.join(test_dir, '**', '*.{rb,erb}')).sort.each do |fixture|
     fixtures += 1
     source = File.read(fixture)
     extra = source[/^# sorbet-args: (.*)$/, 1].to_s.shellsplit
     expected = {}
     source.each_line.with_index(1) do |line, number|
-      messages = line.scan(/# error: ((?:(?!# error:).)+)/).flatten.map(&:strip)
+      messages = line.scan(/# error: ((?:(?!# error:)(?!-?%>).)+)/).flatten.map(&:strip)
       expected[number] = messages unless messages.empty?
     end
 

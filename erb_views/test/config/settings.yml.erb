@@ -1,0 +1,3 @@
+# Not a view: read as an empty file.
+key: <%= ENV.fetch('KEY') { :nope }.not_a_method %>
+other: value

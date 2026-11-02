@@ -1,0 +1,24 @@
+<h1><%= @template.name %></h1>
+<p>Café — <%= @template.nmae %></p> <%# error: Method `nmae` does not exist on `Template` %>
+<%# A comment isn't code: @template.nope %>
+<% if @template.name.empty? %>
+  <%= link_to 'Back', '/' %>
+<% else %>
+  <%- name = @template.name -%>
+  <%== name.upcase %>
+<% end %>
+<%% this is text: @template.nope %>
+<% [1, 2].each do |n| %>
+  <%= n + 'x' %> <%# error: Expected `Integer` but found `String("x")` %>
+<% end %>
+<%= link_to(1, '/') %> <%# error: Expected `String` but found `Integer(1)` for argument `text` %>
+<%= link_to(
+  'x',
+  @template.nmae) %> <%# error: Method `nmae` does not exist on `Template` %>
+<% case @template.name %>
+<% when 'a' %>
+  <p>A</p>
+<% else %>
+  <p><%= @template.name =%></p>
+<% end %>
+<%= @missing %> <%# error: Use of undeclared variable `@missing` %>
