@@ -6,8 +6,9 @@ require 'open3'
 module ErbViews
   # What the generated RBIs depend on, as one digest: the app's Ruby, RBI and ERB files (git's tracked and untracked
   # ones, but not spec/, which the views' types don't depend on), so the RBIs themselves too, and a hand edit gets
-  # rewritten; Gemfile.lock; the generator's own code; and the Sorbet binary. Plain Ruby, so a script can check it
-  # before booting the app: bin/sorbet-plugin-rbis skips the generator when the digest is the one its last run left.
+  # rewritten; Gemfile.lock; sorbet/config, whose flags and ignored paths change what Sorbet reports; the generator's
+  # own code; and the Sorbet binary. Plain Ruby, so a script can check it before booting the app:
+  # bin/sorbet-plugin-rbis skips the generator when the digest is the one its last run left.
   module Inputs
     module_function
 
@@ -22,7 +23,8 @@ module ErbViews
 
     def digest(root, sorbet: self.sorbet)
       listed, status = Open3.capture2('git', 'ls-files', '-z', '--cached', '--others', '--exclude-standard', '--',
-                                      '*.rb', '*.rbi', '*.erb', 'Gemfile.lock', ':!:spec/', chdir: root.to_s)
+                                      '*.rb', '*.rbi', '*.erb', 'Gemfile.lock', 'sorbet/config', ':!:spec/',
+                                      chdir: root.to_s)
       raise "git ls-files failed in #{root}" unless status.success?
 
       digest = Digest::SHA256.new
