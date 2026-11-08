@@ -8,6 +8,7 @@
 // include or at `ApplicationJob` / `ActiveJob::Base`; with no answer it's a Sidekiq job.
 
 #include "Rails.h"
+#include "Template.h"
 
 using namespace std;
 
@@ -110,9 +111,11 @@ ast::ExpressionPtr tAny(core::MutableContext ctx, core::LocOffsets loc, ast::Sen
     return ast::MK::Send(loc, ast::MK::T(loc), core::Names::any(), loc, count, move(types));
 }
 
-// The three Sidekiq methods, as instance methods of a module (`singleton` false) or class methods.
+// The three Sidekiq methods, as class methods, with the types from `perform`'s sig, or (`aliases`) the type aliases
+// addTypeAliases wrote for them.
 void addSidekiqMethods(core::MutableContext ctx, ast::ClassDef::RHS_store &body, core::LocOffsets loc,
-                       const Perform &perform, const vector<Param> &params, const Sig *sig, bool singleton) {
+                       const Perform &perform, const vector<Param> &params, const Sig *sig,
+                       const optional<ConstantName> &aliases) {
     for (auto name : {"perform_async", "perform_in", "perform_at"}) {
         ast::MethodDef::PARAMS_store treeParams;
         ast::Send::ARGS_store args;
@@ -134,12 +137,41 @@ void addSidekiqMethods(core::MutableContext ctx, ast::ClassDef::RHS_store &body,
         for (auto &param : params) {
             treeParams.emplace_back(paramTree(ctx, loc, param));
         }
-        auto copied = sigArgs(ctx, loc, *perform.owner.file, params, sig);
-        for (auto &arg : *copied) {
-            args.emplace_back(move(arg));
+        if (aliases) {
+            for (size_t index = 0; index < params.size(); index++) {
+                args.emplace_back(ast::MK::Symbol(loc, ctx.state.enterNameUTF8(params[index].name)));
+                auto alias = *aliases;
+                alias.emplace_back(fmt::format("Param{}", index));
+                args.emplace_back(constantTree(ctx, loc, absolute(alias)));
+            }
+        } else {
+            auto copied = sigArgs(ctx, loc, *perform.owner.file, params, sig);
+            for (auto &arg : *copied) {
+                args.emplace_back(move(arg));
+            }
         }
-        addMethod(ctx, body, loc, name, move(treeParams), move(args), typeConstant(ctx, loc, {"String"}), singleton);
+        addMethod(ctx, body, loc, name, move(treeParams), move(args), typeConstant(ctx, loc, {"String"}), true);
     }
+}
+
+// `perform`'s parameter types as `Param<n> = T.type_alias { <type> }` in a module named `name` inside the nesting of
+// the file `perform` is in, so their constants resolve as they do there. Returns the module's full name.
+optional<ConstantName> addTypeAliases(core::MutableContext ctx, ast::ClassDef &root, core::LocOffsets loc,
+                                      const Perform &perform, const vector<Param> &params, const Sig *sig,
+                                      string_view name) {
+    auto args = sigArgs(ctx, loc, *perform.owner.file, params, sig);
+    if (!args) {
+        return nullopt;
+    }
+    ast::ClassDef::RHS_store body;
+    for (size_t index = 0; index < params.size(); index++) {
+        auto constant = ast::MK::UnresolvedConstant(loc, ast::MK::EmptyTree(),
+                                                    ctx.state.enterNameConstant(fmt::format("Param{}", index)));
+        auto alias = ast::MK::Send0Block(loc, ast::MK::T(loc), core::Names::typeAlias(), loc,
+                                         ast::MK::Block0(loc, move((*args)[index * 2 + 1])));
+        body.emplace_back(ast::MK::Assign(loc, move(constant), move(alias)));
+    }
+    return addUnderNesting(ctx, root, loc, perform.owner, name, move(body));
 }
 
 void addActiveJobMethods(core::MutableContext ctx, ast::ClassDef::RHS_store &body, core::LocOffsets loc,
@@ -211,18 +243,25 @@ void rewriteJobs(core::MutableContext ctx, ast::ClassDef &root, const App &app, 
 
         if (perform->own) {
             if (kind == JobKind::Sidekiq) {
-                addSidekiqMethods(ctx, tree->rhs, loc, *perform, copied->params, sigPtr, true);
+                addSidekiqMethods(ctx, tree->rhs, loc, *perform, copied->params, sigPtr, nullopt);
             } else {
                 addActiveJobMethods(ctx, tree->rhs, loc, *perform, *copied);
             }
             continue;
         }
-        // perform is in another file: the methods go in a module inside that file's nesting, so the sig's constants
-        // resolve as they do there, and the job extends it.
-        ast::ClassDef::RHS_store methods;
-        addSidekiqMethods(ctx, methods, loc, *perform, copied->params, sigPtr, false);
-        auto module = addUnderNesting(ctx, root, loc, perform->owner, "SorbetSidekiqMethods", move(methods));
-        tree->rhs.emplace_back(mixinStatement(ctx, loc, "extend", module));
+        // perform is in another file (a module the job includes, or a superclass). The methods are still the job's
+        // own: Sorbet ranks the module Sidekiq::Job's `mixes_in_class_methods` adds above any module the job extends,
+        // whatever the order. Their types are aliases inside that file's nesting, so the sig's constants resolve as
+        // they do there, written once, in the job's own file.
+        if (!main || main->file->path != file->path) {
+            continue;
+        }
+        auto job = join(def.fullName);
+        auto aliases = addTypeAliases(ctx, root, loc, *perform, copied->params, sigPtr,
+                                      "SorbetSidekiqTypes_" + replaceAll(job, "::", "__"));
+        if (aliases) {
+            addSidekiqMethods(ctx, tree->rhs, loc, *perform, copied->params, sigPtr, aliases);
+        }
     }
 }
 

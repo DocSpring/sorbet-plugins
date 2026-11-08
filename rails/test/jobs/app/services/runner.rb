@@ -6,4 +6,5 @@ class Runner
   def perform; end
 end
 
-Runner.perform_async # error: Method `perform_async` does not exist on `T.class_of(Runner)`
+# Sidekiq's own, untyped.
+T.reveal_type(Runner.perform_async) # error: Revealed type: `T.untyped`
