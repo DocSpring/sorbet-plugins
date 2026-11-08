@@ -9,7 +9,8 @@
 # per line are fine; in a template, `<%# error: ... %>`). Any error without a marker, and any marker without an error,
 # fails the fixture. A `# sorbet-args: ...` line adds flags (more plugins, `--enable-experimental-rspec`). Each fixture
 # is checked on its own, except for the plugins in CHECKED_TOGETHER, whose fixtures depend on each other and are
-# checked in one run, as an app's files are. Then it runs each plugin's generator tests, if it has any.
+# checked in one run, as an app's files are. Then it runs each plugin's generator tests, if it has any, and with the
+# rails plugin, test/language_server_test.rb (the plugins in Sorbet's language server, after edits).
 
 require 'open3'
 require 'shellwords'
@@ -108,4 +109,5 @@ test_failures = plugins.flat_map { |plugin| Dir.glob(File.join(root, plugin, 'ge
   puts "Running #{test.delete_prefix("#{root}/")}"
   !system({ 'SORBET' => sorbet }, RbConfig.ruby, test)
 end
-exit(failures.zero? && test_failures.zero? ? 0 : 1)
+language_server_failed = plugins.include?('rails') && !system(RbConfig.ruby, File.join(__dir__, 'language_server_test.rb'), sorbet)
+exit(failures.zero? && test_failures.zero? && !language_server_failed ? 0 : 1)
