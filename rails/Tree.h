@@ -28,6 +28,22 @@ void addMethod(core::MutableContext ctx, ast::ClassDef::RHS_store &body, core::L
                ast::MethodDef::PARAMS_store params, ast::Send::ARGS_store sigArgs,
                std::optional<ast::ExpressionPtr> returns, bool singleton);
 
+// A method's parameters and sig, read to copy into a synthesized method.
+struct CopiedMethod {
+    std::shared_ptr<RubyFile> file;
+    std::vector<Param> params;
+    std::optional<Sig> sig;
+};
+
+// Reads `method`, defined in `owner`, to copy. On a parameter without a name or a sig with a part the plugin doesn't
+// copy, reports an error that names `label` (`GenericJob#perform`) and returns nullopt.
+std::optional<CopiedMethod> readMethod(core::MutableContext ctx, core::LocOffsets loc, const Definition &owner,
+                                       const Definition::Method &method, std::string_view label);
+
+// Adds a method with the copied method's parameters and types: `T.untyped` for each without a sig.
+void addCopiedMethod(core::MutableContext ctx, ast::ClassDef::RHS_store &body, core::LocOffsets loc,
+                     std::string_view name, const CopiedMethod &method, bool singleton);
+
 // Appends `module <name>; <body>; end` to the root, inside `def`'s own lexical nesting reopened (each enclosing
 // module or class written as in `def`'s file), so constants in the body resolve as they do in that file. Returns the
 // module's full name.

@@ -25,6 +25,10 @@ using ConstantName = std::vector<std::string>;
 
 std::string join(const ConstantName &name);
 
+// Lowercase without underscores: what a file name and a constant name share under Zeitwerk's inflection
+// (`oauth_helper` and `OAuthHelper`).
+std::string normalizedName(std::string_view name);
+
 // Where the app's files are, worked out from the path of a file Sorbet is checking: the part before `app/<dir>/`
 // (or `lib/`). `srb tc` and the language server give paths relative to the app (`./app/jobs/x.rb`), the plugin tests
 // absolute ones. The erb_views generator type-checks copies of some controllers in a temporary directory that has no
@@ -38,6 +42,7 @@ struct App {
     std::optional<std::string> find(std::string_view relative) const;
     // The names of the entries in a directory of the app, under the root first, then the working directory.
     std::vector<std::string> list(std::string_view relativeDir) const;
+    bool isDirectory(std::string_view relative) const;
     // The path relative to the app, if `path` is under the root.
     std::optional<std::string> relative(std::string_view path) const;
 };
@@ -61,6 +66,8 @@ public:
     std::string_view slice(const pm_location_t &loc) const;
     // The line of a node, for error messages.
     int line(const pm_node_t *node) const;
+    // A node's byte offsets in the source (begin, end): a location in Sorbet's tree when this is the file it checks.
+    std::pair<uint32_t, uint32_t> offsets(const pm_node_t *node) const;
 
 private:
     std::string source;
@@ -90,6 +97,11 @@ struct Definition {
     ConstantRef written;
     const pm_node_t *superclass; // a class's superclass expression, or nullptr
     std::vector<const pm_node_t *> body;
+
+    // The lexical scopes a class's superclass is looked up in: its nesting without the class itself.
+    std::vector<ConstantName> outerNesting() const {
+        return std::vector<ConstantName>(nesting.begin() + 1, nesting.end());
+    }
 
     // `include X` (or `extend X`) statements in the body, with literal constants, in order.
     std::vector<ConstantRef> mixins(std::string_view method) const;

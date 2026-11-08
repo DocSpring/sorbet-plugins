@@ -27,14 +27,7 @@ app = ErbViews::App.new(Rails.root)
 graph = ErbViews::RenderGraph.new(app)
 types = ErbViews::Types.new(app, graph, sorbet:, rbi_dir: app.relative(File.expand_path(output, Rails.root)))
 
-# The controllers and mailers whose Tapioca RBI declares their own HelperMethods module (one without uses its
-# parent's).
-helper_modules = Dir.glob(File.join(Rails.root, 'sorbet/rbi/dsl/**/*.rbi')).filter_map do |file|
-  source = File.read(file)
-  source[/^class (\S+)/, 1] if source.match?(/^  module HelperMethods$/)
-end
-
-rbi = ErbViews::Rbi.new(app, graph, types, helper_modules:)
+rbi = ErbViews::Rbi.new(app, graph, types, helper_modules: app.helper_owners)
 types.infer! { rbi.combined }
 ErbViews::Rbi.write(output, rbi.files)
 # What the RBIs can't be right without (a declaration its renderers contradict, a render Rails resolves elsewhere):

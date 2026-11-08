@@ -39,12 +39,8 @@ Rails.application.eager_load!
 app = ErbViews::App.new(Rails.root)
 graph = ErbViews::RenderGraph.new(app)
 types = ErbViews::Types.new(app, graph, sorbet:)
-helper_proxies = Dir.glob(File.join(Rails.root, 'sorbet/rbi/dsl/**/*.rbi')).filter_map do |file|
-  source = File.read(file)
-  source[/^class (\S+)/, 1] if source.include?('class HelperProxy < ')
-end
-rbi = ErbViews::Rbi.new(app, graph, types, helper_proxies:)
-types.infer! { rbi.render }
+rbi = ErbViews::Rbi.new(app, graph, types, helper_modules: app.helper_owners)
+types.infer! { rbi.combined }
 
 IMPLICIT = /_(counter|iteration)\z/
 

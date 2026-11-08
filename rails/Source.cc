@@ -1,10 +1,14 @@
 #include "Source.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cctype>
 #include <filesystem>
 #include <fstream>
+#include <mutex>
+#include <shared_mutex>
 #include <sstream>
+#include <unordered_map>
 
 using namespace std;
 
@@ -41,8 +45,9 @@ optional<string> rootBefore(string_view path, string_view dir) {
     return nullopt;
 }
 
-// Lowercase without underscores: what a file name and a constant name share under Zeitwerk's inflection.
-string normalized(string_view name) {
+} // namespace
+
+string normalizedName(string_view name) {
     string out;
     for (auto c : name) {
         if (c != '_') {
@@ -51,8 +56,6 @@ string normalized(string_view name) {
     }
     return out;
 }
-
-} // namespace
 
 optional<App> App::forPath(string_view path) {
     if (auto root = rootBefore(path, "app/")) {
@@ -75,23 +78,66 @@ optional<string> App::find(string_view relative) const {
     return nullopt;
 }
 
-vector<string> App::list(string_view relativeDir) const {
-    vector<string> names;
-    vector<string> dirs = {root + string(relativeDir)};
-    if (!root.empty() && root != "./") {
-        dirs.emplace_back(relativeDir);
-    }
-    for (auto &dir : dirs) {
-        error_code ec;
-        for (filesystem::directory_iterator it(dir, ec), end; !ec && it != end; it.increment(ec)) {
-            auto name = it->path().filename().string();
-            if (find_if(names.begin(), names.end(), [&](auto &n) { return n == name; }) == names.end()) {
-                names.emplace_back(name);
-            }
+namespace {
+
+// Directory listings, kept for a second. Every class the plugin types looks up constants in every autoload
+// directory, and listing them each time made `srb tc` take half as long again. A second is short enough that the
+// language server sees a new file almost at once; file contents are never kept.
+using Names = shared_ptr<const vector<string>>;
+struct Listing {
+    chrono::steady_clock::time_point read;
+    Names names;
+};
+shared_mutex listingsMutex;
+unordered_map<string, Listing> listings;
+constexpr auto LISTING_LIFETIME = chrono::seconds(1);
+
+// Sorted.
+Names listDirectory(const string &dir) {
+    auto now = chrono::steady_clock::now();
+    {
+        shared_lock<shared_mutex> lock(listingsMutex);
+        auto it = listings.find(dir);
+        if (it != listings.end() && now - it->second.read < LISTING_LIFETIME) {
+            return it->second.names;
         }
     }
+    vector<string> names;
+    error_code ec;
+    for (filesystem::directory_iterator it(dir, ec), end; !ec && it != end; it.increment(ec)) {
+        names.emplace_back(it->path().filename().string());
+    }
     sort(names.begin(), names.end());
-    return names;
+    auto shared = make_shared<const vector<string>>(move(names));
+    unique_lock<shared_mutex> lock(listingsMutex);
+    listings[dir] = Listing{now, shared};
+    return shared;
+}
+
+} // namespace
+
+vector<string> App::list(string_view relativeDir) const {
+    auto names = listDirectory(root + string(relativeDir));
+    if (root.empty() || root == "./") {
+        return *names;
+    }
+    vector<string> merged = *names;
+    // Held in a local: a range-for doesn't keep a temporary alive, and another thread may replace the cached
+    // listing (and free it) while this one reads it.
+    auto inWorkingDirectory = listDirectory(string(relativeDir));
+    for (auto &name : *inWorkingDirectory) {
+        if (std::find(merged.begin(), merged.end(), name) == merged.end()) {
+            merged.emplace_back(name);
+        }
+    }
+    sort(merged.begin(), merged.end());
+    return merged;
+}
+
+bool App::isDirectory(string_view relative) const {
+    auto path = find(relative);
+    error_code ec;
+    return path.has_value() && filesystem::is_directory(*path, ec);
 }
 
 optional<string> App::relative(string_view path) const {
@@ -137,6 +183,12 @@ string_view RubyFile::slice(const pm_location_t &loc) const {
 int RubyFile::line(const pm_node_t *node) const {
     auto offset = reinterpret_cast<const char *>(node->location.start) - source.data();
     return 1 + static_cast<int>(count(source.begin(), source.begin() + offset, '\n'));
+}
+
+pair<uint32_t, uint32_t> RubyFile::offsets(const pm_node_t *node) const {
+    auto begin = reinterpret_cast<const char *>(node->location.start) - source.data();
+    auto end = reinterpret_cast<const char *>(node->location.end) - source.data();
+    return {static_cast<uint32_t>(begin), static_cast<uint32_t>(end)};
 }
 
 optional<ConstantRef> constantRef(const RubyFile &file, const pm_node_t *node) {
@@ -325,7 +377,7 @@ optional<string> constantFile(const App &app, const ConstantName &name) {
         bool found = true;
         for (size_t i = 0; i < name.size() && found; i++) {
             auto last = i + 1 == name.size();
-            auto want = normalized(name[i]);
+            auto want = normalizedName(name[i]);
             found = false;
             for (auto &entry : app.list(path)) {
                 auto stem = last ? (entry.size() > 3 && entry.substr(entry.size() - 3) == ".rb"
@@ -333,7 +385,7 @@ optional<string> constantFile(const App &app, const ConstantName &name) {
                                         : string())
                                  : entry;
                 if (!stem.empty() && entry.find('.') == (last ? entry.size() - 3 : string::npos) &&
-                    normalized(stem) == want) {
+                    normalizedName(stem) == want) {
                     path += last ? entry : entry + "/";
                     found = true;
                     break;

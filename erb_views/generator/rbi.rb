@@ -13,7 +13,7 @@ module ErbViews
   # Writes the RBIs for the plugin's template classes, in a directory (sorbet/rbi/erb_views) that mirrors the app:
   #
   # - contexts.rbi: the classes the template classes inherit. A view's class inherits SorbetViews::Contexts::Controller
-  #   (ApplicationController's helpers, through its Tapioca HelperProxy) or SorbetViews::Contexts::Mailer
+  #   (ApplicationController's helpers, through its HelperProxy) or SorbetViews::Contexts::Mailer
   #   (ApplicationMailer's), by its path, and both include SorbetViews::Partials, the methods literal renders of
   #   partials call. Each ERB partial's own file defines its method; this declares the ones for partials that aren't
   #   ERB templates in the app (a gem's), which take any locals.
@@ -37,7 +37,7 @@ module ErbViews
     CONTEXTS = 'contexts.rbi'
 
     # `types` answers `ivar_type(logical, file, name)` and `local_type(logical, name)` with a type string.
-    # `helper_modules`: the names of the controllers and mailers whose Tapioca RBI declares their own `HelperMethods`.
+    # `helper_modules`: the names of the controllers and mailers whose `HelperMethods` Sorbet knows (App#helper_owners).
     def initialize(app, graph, types, helper_modules:)
       @app = app
       @graph = graph
@@ -49,7 +49,7 @@ module ErbViews
       @partial_locals = {}
       @ivar_hints = {}
       unless @helper_modules.include?('ApplicationController')
-        raise ArgumentError, "Tapioca's RBI for ApplicationController has no HelperMethods module: run `bin/tapioca dsl`"
+        raise ArgumentError, 'ApplicationController has no HelperMethods: is it in app/controllers?'
       end
     end
 

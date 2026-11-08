@@ -34,11 +34,18 @@ public:
             return;
         }
         auto isUnder = [&](string_view dir) { return relative->substr(0, dir.size()) == dir; };
-        if (!isUnder("app/jobs/")) {
+        auto jobs = isUnder("app/jobs/");
+        auto helpers = isUnder("app/controllers/") || isUnder("app/mailers/");
+        if (!jobs && !helpers) {
             return;
         }
         auto file = make_shared<rails::RubyFile>(string(path), string(ctx.file.data(ctx).source()));
-        rails::rewriteJobs(ctx, classDef, *app, file);
+        if (jobs) {
+            rails::rewriteJobs(ctx, classDef, *app, file);
+        }
+        if (helpers) {
+            rails::rewriteHelpers(ctx, classDef, *app, file);
+        }
     }
 };
 

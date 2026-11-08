@@ -69,6 +69,24 @@ module ErbViews
                         .uniq
     end
 
+    # The controllers and mailers whose `HelperMethods` Sorbet knows: each of ours in app/controllers and app/mailers,
+    # which the rails Sorbet plugin writes one for, and each with one in Tapioca's RBIs (gems' classes, and what gems
+    # add to ours).
+    def helper_owners
+      bases = [ActionController::Base, (ActionMailer::Base if defined?(ActionMailer::Base))].compact
+      ours = bases.flat_map(&:descendants).filter_map do |klass|
+        next if klass.name.nil?
+
+        file, = Object.const_source_location(klass.name)
+        klass.name if file&.start_with?("#{@root}app/controllers/", "#{@root}app/mailers/")
+      end
+      generated = Dir.glob(File.join(@root, 'sorbet/rbi/dsl/**/*.rbi')).filter_map do |file|
+        source = File.read(file)
+        source[/^class (\S+)/, 1] if source.match?(/^  module HelperMethods$/)
+      end
+      (ours + generated).uniq
+    end
+
     # A layout's logical name, as ActionView::Layouts normalizes it: `layouts/` goes in front unless it's there.
     def self.layout_name(name) = name.match?(/\blayouts/) ? name : "layouts/#{name}"
 
