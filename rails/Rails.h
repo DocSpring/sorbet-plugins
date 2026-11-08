@@ -144,6 +144,8 @@ void rewriteConcerns(core::MutableContext ctx, ast::ClassDef &root, const App &a
                      const std::shared_ptr<RubyFile> &file);
 void rewriteModels(core::MutableContext ctx, ast::ClassDef &root, const App &app,
                    const std::shared_ptr<RubyFile> &file);
+void rewriteComponents(core::MutableContext ctx, ast::ClassDef &root, const App &app,
+                       const std::shared_ptr<RubyFile> &file);
 
 } // namespace sorbet::plugins::rails
 

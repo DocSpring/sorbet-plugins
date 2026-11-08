@@ -56,16 +56,6 @@ struct Literal {
     string name; // a symbol's or string's text
 };
 
-optional<string> nameLiteral(const pm_node_t *node) {
-    if (node != nullptr && PM_NODE_TYPE_P(node, PM_SYMBOL_NODE)) {
-        return stringValue(reinterpret_cast<const pm_symbol_node_t *>(node)->unescaped);
-    }
-    if (node != nullptr && PM_NODE_TYPE_P(node, PM_STRING_NODE)) {
-        return stringValue(reinterpret_cast<const pm_string_node_t *>(node)->unescaped);
-    }
-    return nullopt;
-}
-
 Literal literal(const pm_node_t *node) {
     if (node == nullptr) {
         return {};
@@ -93,14 +83,6 @@ bool isMethodName(string_view name) {
     return absl::c_all_of(name, [](char c) { return isalnum(static_cast<unsigned char>(c)) || c == '_'; });
 }
 
-// A call's arguments: the positional ones, then the `key: value` pairs and `**` splats of a trailing keyword hash.
-struct Arguments {
-    vector<const pm_node_t *> positional;
-    vector<pair<string, const pm_node_t *>> keywords;
-    vector<const pm_assoc_splat_node_t *> splats;
-    bool readable = true; // every keyword's key is a symbol
-};
-
 // The local variable a keyword value reads (`prefix: prefix`, or `prefix:` for short).
 optional<string> readsLocal(const RubyFile &file, const pm_node_t *value) {
     if (value != nullptr && PM_NODE_TYPE_P(value, PM_IMPLICIT_NODE)) {
@@ -110,34 +92,6 @@ optional<string> readsLocal(const RubyFile &file, const pm_node_t *value) {
         return string(file.name(reinterpret_cast<const pm_local_variable_read_node_t *>(value)->name));
     }
     return nullopt;
-}
-
-Arguments splitArguments(const pm_call_node_t *call) {
-    Arguments out;
-    for (auto arg : arguments(call)) {
-        if (!PM_NODE_TYPE_P(arg, PM_KEYWORD_HASH_NODE)) {
-            out.positional.emplace_back(arg);
-            continue;
-        }
-        auto &elements = reinterpret_cast<const pm_keyword_hash_node_t *>(arg)->elements;
-        for (size_t i = 0; i < elements.size; i++) {
-            auto element = elements.nodes[i];
-            if (PM_NODE_TYPE_P(element, PM_ASSOC_SPLAT_NODE)) {
-                out.splats.emplace_back(reinterpret_cast<const pm_assoc_splat_node_t *>(element));
-                continue;
-            }
-            auto assoc = reinterpret_cast<const pm_assoc_node_t *>(element);
-            auto key = PM_NODE_TYPE_P(element, PM_ASSOC_NODE) && PM_NODE_TYPE_P(assoc->key, PM_SYMBOL_NODE)
-                           ? nameLiteral(assoc->key)
-                           : nullopt;
-            if (!key) {
-                out.readable = false;
-                continue;
-            }
-            out.keywords.emplace_back(*key, assoc->value);
-        }
-    }
-    return out;
 }
 
 // The macros Rails and ActiveRecord give a model class whose methods or types the plugin writes.
@@ -161,43 +115,6 @@ optional<Association::Macro> associationMacro(string_view name) {
         return Association::Macro::HasAndBelongsToMany;
     }
     return nullopt;
-}
-
-// The calls to model macros (on `self`, or with no receiver) anywhere in a node, but not in the methods, classes and
-// lambdas it defines.
-vector<const pm_call_node_t *> macroCalls(const RubyFile &file, const pm_node_t *node,
-                                          const function<bool(string_view)> &isMacro) {
-    struct Search {
-        const RubyFile *file;
-        const function<bool(string_view)> *isMacro;
-        vector<const pm_call_node_t *> found;
-    } search{&file, &isMacro, {}};
-    if (node == nullptr) {
-        return {};
-    }
-    pm_visit_node(
-        node,
-        [](const pm_node_t *node, void *data) -> bool {
-            auto search = static_cast<Search *>(data);
-            switch (PM_NODE_TYPE(node)) {
-                case PM_DEF_NODE:
-                case PM_CLASS_NODE:
-                case PM_MODULE_NODE:
-                case PM_SINGLETON_CLASS_NODE:
-                case PM_LAMBDA_NODE:
-                    return false;
-                default:
-                    break;
-            }
-            auto call = asCall(node);
-            if (call != nullptr && (call->receiver == nullptr || isSelf(call->receiver)) &&
-                (*search->isMacro)(callName(*search->file, call))) {
-                search->found.emplace_back(call);
-            }
-            return true;
-        },
-        &search);
-    return search.found;
 }
 
 // A class method of the app's that declares an enum: one that passes its first two parameters to `enum`.

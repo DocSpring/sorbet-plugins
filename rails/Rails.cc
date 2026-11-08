@@ -44,7 +44,10 @@ public:
         // A model's file has a class with a superclass. Controllers, jobs, mailers, views and the rest never hold one.
         auto models = isUnder("app/") && !jobs && !helpers && !isUnder("app/views/") && !isUnder("app/helpers/") &&
                       !isUnder("app/admin/") && !isUnder("app/components/") && source.find(" < ") != string_view::npos;
-        if (!jobs && !helpers && !concerns && !models) {
+        // A component's slots: ViewComponent's `renders_one` and `renders_many`.
+        auto components = isUnder("app/") && (source.find("renders_one") != string_view::npos ||
+                                               source.find("renders_many") != string_view::npos);
+        if (!jobs && !helpers && !concerns && !models && !components) {
             return;
         }
         auto file = make_shared<rails::RubyFile>(string(path), string(source));
@@ -62,6 +65,9 @@ public:
         }
         if (models) {
             rails::rewriteModels(ctx, classDef, *app, file);
+        }
+        if (components) {
+            rails::rewriteComponents(ctx, classDef, *app, file);
         }
     }
 };

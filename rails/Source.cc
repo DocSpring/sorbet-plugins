@@ -5,6 +5,7 @@
 #include <chrono>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <mutex>
 #include <shared_mutex>
 #include <sstream>
@@ -558,6 +559,92 @@ optional<Definition> resolve(const App &app, const vector<ConstantName> &nesting
         }
     }
     return nullopt;
+}
+
+optional<string> nameLiteral(const pm_node_t *node) {
+    if (node != nullptr && PM_NODE_TYPE_P(node, PM_SYMBOL_NODE)) {
+        return stringValue(reinterpret_cast<const pm_symbol_node_t *>(node)->unescaped);
+    }
+    if (node != nullptr && PM_NODE_TYPE_P(node, PM_STRING_NODE)) {
+        return stringValue(reinterpret_cast<const pm_string_node_t *>(node)->unescaped);
+    }
+    return nullopt;
+}
+
+namespace {
+
+void addPairs(const pm_node_list_t &elements, Arguments &out) {
+    for (size_t i = 0; i < elements.size; i++) {
+        auto element = elements.nodes[i];
+        if (PM_NODE_TYPE_P(element, PM_ASSOC_SPLAT_NODE)) {
+            out.splats.emplace_back(reinterpret_cast<const pm_assoc_splat_node_t *>(element));
+            continue;
+        }
+        auto assoc = reinterpret_cast<const pm_assoc_node_t *>(element);
+        auto key = PM_NODE_TYPE_P(element, PM_ASSOC_NODE) && PM_NODE_TYPE_P(assoc->key, PM_SYMBOL_NODE)
+                       ? nameLiteral(assoc->key)
+                       : nullopt;
+        if (!key) {
+            out.readable = false;
+            continue;
+        }
+        out.keywords.emplace_back(*key, assoc->value);
+    }
+}
+
+} // namespace
+
+Arguments splitArguments(const pm_call_node_t *call) {
+    Arguments out;
+    for (auto arg : arguments(call)) {
+        if (!PM_NODE_TYPE_P(arg, PM_KEYWORD_HASH_NODE)) {
+            out.positional.emplace_back(arg);
+            continue;
+        }
+        addPairs(reinterpret_cast<const pm_keyword_hash_node_t *>(arg)->elements, out);
+    }
+    return out;
+}
+
+Arguments hashArguments(const pm_hash_node_t *hash) {
+    Arguments out;
+    addPairs(hash->elements, out);
+    return out;
+}
+
+vector<const pm_call_node_t *> macroCalls(const RubyFile &file, const pm_node_t *node,
+                                          const function<bool(string_view)> &isMacro) {
+    struct Search {
+        const RubyFile *file;
+        const function<bool(string_view)> *isMacro;
+        vector<const pm_call_node_t *> found;
+    } search{&file, &isMacro, {}};
+    if (node == nullptr) {
+        return {};
+    }
+    pm_visit_node(
+        node,
+        [](const pm_node_t *node, void *data) -> bool {
+            auto search = static_cast<Search *>(data);
+            switch (PM_NODE_TYPE(node)) {
+                case PM_DEF_NODE:
+                case PM_CLASS_NODE:
+                case PM_MODULE_NODE:
+                case PM_SINGLETON_CLASS_NODE:
+                case PM_LAMBDA_NODE:
+                    return false;
+                default:
+                    break;
+            }
+            auto call = asCall(node);
+            if (call != nullptr && (call->receiver == nullptr || isSelf(call->receiver)) &&
+                (*search->isMacro)(callName(*search->file, call))) {
+                search->found.emplace_back(call);
+            }
+            return true;
+        },
+        &search);
+    return search.found;
 }
 
 } // namespace sorbet::plugins::rails

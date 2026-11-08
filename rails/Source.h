@@ -7,6 +7,7 @@
 // Files other than the one Sorbet is rewriting are read from disk on every call: rewrites run on many threads at
 // once, and the language server must see a file as soon as it's saved, so nothing is cached.
 
+#include <functional>
 #include <memory>
 #include <optional>
 #include <string>
@@ -147,6 +148,22 @@ std::vector<const pm_node_t *> arguments(const pm_call_node_t *call);
 // The statements of a body (a PM_STATEMENTS_NODE, or a begin block's statements).
 std::vector<const pm_node_t *> statements(const pm_node_t *body);
 std::string stringValue(const pm_string_t &string);
+// A symbol's or string's text, or nullopt for any other node.
+std::optional<std::string> nameLiteral(const pm_node_t *node);
+// A call's arguments: the positional ones, then the `key: value` pairs and `**` splats of a trailing keyword hash.
+struct Arguments {
+    std::vector<const pm_node_t *> positional;
+    std::vector<std::pair<std::string, const pm_node_t *>> keywords;
+    std::vector<const pm_assoc_splat_node_t *> splats;
+    bool readable = true; // every keyword's key is a symbol
+};
+Arguments splitArguments(const pm_call_node_t *call);
+// A hash literal's (`{ key: value }`) pairs and splats, as `Arguments::keywords` and `splats`.
+Arguments hashArguments(const pm_hash_node_t *hash);
+// The calls (on `self`, or with no receiver) whose name `isMacro` accepts, anywhere in a node, but not in the methods,
+// classes and lambdas it defines: the macros a class body runs.
+std::vector<const pm_call_node_t *> macroCalls(const RubyFile &file, const pm_node_t *node,
+                                               const std::function<bool(std::string_view)> &isMacro);
 
 } // namespace sorbet::plugins::rails
 
