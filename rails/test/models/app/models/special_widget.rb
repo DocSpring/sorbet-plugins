@@ -10,3 +10,5 @@ T.reveal_type(SpecialWidget.visible) # error: Revealed type: `SpecialWidget::Pri
 T.reveal_type(SpecialWidget.status_draft) # error: Revealed type: `SpecialWidget::PrivateRelation`
 T.reveal_type(SpecialWidget.statuses) # error: Revealed type: `T::Hash[T.any(String, Symbol), Integer]`
 T.reveal_type(SpecialWidget.new.status_draft?) # error: Revealed type: `T::Boolean`
+T.reveal_type(SpecialWidget.new.status) # error: Revealed type: `String`
+T.reveal_type(SpecialWidget.new.kind) # error: Revealed type: `String`

@@ -4,3 +4,6 @@ class OAuthApplication < ApplicationRecord
 end
 
 T.reveal_type(OAuthApplication.ids) # error: Revealed type: `T::Array[String]`
+T.reveal_type(OAuthApplication.new.id) # error: Revealed type: `String`
+T.reveal_type(OAuthApplication.new.id_value) # error: Revealed type: `String`
+T.reveal_type(OAuthApplication.new.name) # error: Revealed type: `String`

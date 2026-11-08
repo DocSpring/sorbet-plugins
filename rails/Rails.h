@@ -5,6 +5,8 @@
 #include "Source.h"
 #include "Tree.h"
 
+#include <set>
+
 namespace sorbet::plugins::rails {
 
 enum class Kind { None, Controller, Mailer };
@@ -49,10 +51,42 @@ struct MacroProblem {
     std::string message;
 };
 
+struct Table;
+
+// One change a model macro makes to the model's attributes, as ModelMacros.cc reads them. Rails makes them in order:
+// a superclass's first, then each class's in its body's order.
+struct AttributeChange {
+    enum class Kind {
+        Declare,   // `attribute :name` with no type, and the ones `enum` and `serialize` make: keeps the type
+        Type,      // `attribute :name, :type`
+        Enum,      // `enum :name, ...`: the type becomes the enum's, around the one before it
+        Serialize, // `serialize :name, ...`: the same, with the serialized class
+        Alias,     // `alias_attribute :name, :old`
+    };
+    Kind kind;
+    std::string name;
+    // Type: the type's symbol (`boolean`). Serialize: `Array` or `Hash` for YAML of that class, or empty for any other
+    // serializer. Alias: the attribute it's an alias of.
+    std::string detail;
+    bool array = false; // Type: `array: true`
+    std::shared_ptr<RubyFile> file;
+    const pm_node_t *node;
+};
+
+// The types of `attribute :name, :type` the plugin writes: the symbols for the column types it reads.
+bool knownAttributeType(std::string_view symbol);
+
+// RBI-shaped source for the model's GeneratedAttributeMethods (ModelColumns.cc): the methods Tapioca's
+// ActiveRecordColumns compiler wrote for each attribute, from the table's columns (`primaryKey` is its primary key
+// column, if it has one) without the ignored ones, and the macros' changes.
+std::string attributeMethods(const Model &model, const Table &table, const std::optional<std::string> &primaryKey,
+                             const std::set<std::string, std::less<>> &ignoredColumns,
+                             const std::vector<AttributeChange> &changes, std::vector<MacroProblem> &problems);
+
 // RBI-shaped source (for addTemplate) for the methods of the `scope`, `enum` and `store_accessor` calls in a model's
-// code (ModelMacros.cc), and the macros it couldn't read.
-std::string modelMacros(const App &app, const Model &model, const Inflector &inflector,
-                        std::vector<MacroProblem> &problems);
+// code and its attributes (ModelMacros.cc), and the macros it couldn't read.
+std::string modelMacros(const App &app, const Model &model, const Inflector &inflector, const Table &table,
+                        const std::optional<std::string> &primaryKey, std::vector<MacroProblem> &problems);
 
 // Each part runs once per file, from the file's `<root>` body, after Sorbet has rewritten every class in it.
 void rewriteJobs(core::MutableContext ctx, ast::ClassDef &root, const App &app, const std::shared_ptr<RubyFile> &file);

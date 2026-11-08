@@ -11,6 +11,12 @@ module ActiveRecord
     def self.attribute(name, cast_type = nil, **options); end
     def self.validates(*attributes); end
     def self.with_options(options, &block); end
+    def self.serialize(attr_name, coder: nil, type: Object, **options); end
+    def self.alias_attribute(new_name, old_name); end
+    def self.ignored_columns; end
+    def self.ignored_columns=(columns); end
+    def self.define_method(name, &block); end
+    def [](name); end
   end
 
   class Relation
@@ -57,6 +63,7 @@ module ActiveSupport
   end
 
   class Duration; end
+  class TimeWithZone; end
 end
 
 module Audited

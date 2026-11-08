@@ -12,6 +12,22 @@ class ApplicationRecord < ActiveRecord::Base
   def self.suffixed_enum(name, values)
     enum(name, values, suffix: true)
   end
+
+  # An attribute macro of the app's own: each name it's given gets `attribute name, :boolean`.
+  def self.default_boolean_value(*fields, value: false)
+    fields.each do |field|
+      attribute field, :boolean, default: value
+      define_method(field) do
+        T.bind(self, ApplicationRecord)
+        self[field].nil? ? value : self[field]
+      end
+    end
+  end
+
+  # A macro the plugin can't read: it would have to run the code to know the name.
+  def self.text_attribute(name)
+    attribute(:"#{name}_text", :string)
+  end
 end
 
 ApplicationRecord.where # error: Method `where` does not exist on `T.class_of(ApplicationRecord)`

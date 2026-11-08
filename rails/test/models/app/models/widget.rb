@@ -66,3 +66,14 @@ T.reveal_type(Widget.new.settings_theme) # error: Revealed type: `T.untyped`
 Widget.new.settings_font = 'x'
 T.reveal_type(Widget.new.settings_theme_changed?) # error: Revealed type: `T::Boolean`
 T.reveal_type(Widget.new.saved_change_to_settings_font?) # error: Revealed type: `T::Boolean`
+
+# Columns, with the enums' types: `attr_enum` makes the type an integer, and an attribute with no column isn't nilable.
+T.reveal_type(Widget.new.name) # error: Revealed type: `T.nilable(String)`
+T.reveal_type(Widget.new.order) # error: Revealed type: `Integer`
+T.reveal_type(Widget.new.status) # error: Revealed type: `String`
+Widget.new.status = nil # error: Assigning a value to `value` that does not match expected type `T.any(String, Symbol, Integer)`
+T.reveal_type(Widget.new.shade) # error: Revealed type: `T.nilable(String)`
+Widget.new.shade = 1 # error: Assigning a value to `value` that does not match expected type `T.nilable(T.any(String, Symbol))`
+T.reveal_type(Widget.new.kind) # error: Revealed type: `String`
+T.reveal_type(Widget.new.settings) # error: Revealed type: `T.untyped`
+T.reveal_type(Widget.new.id_value) # error: Revealed type: `Integer`

@@ -1,6 +1,8 @@
 // Model macros: the methods Tapioca's ActiveRecordScope, ActiveRecordEnum and ActiveRecordStore compilers wrote for
-// the `scope`, `enum` and `store_accessor` calls in a model's own code. The plugin reads them from the class bodies of
-// the model and its superclasses, and from the `included` blocks of the app concerns each one includes.
+// the `scope`, `enum` and `store_accessor` calls in a model's own code, and the changes the `attribute`, `enum`,
+// `serialize`, `alias_attribute` and `ignored_columns` calls make to its attributes (ModelColumns.cc writes those). The
+// plugin reads them from the class bodies of the model and its superclasses, and from the `included` blocks of the app
+// concerns each one includes.
 //
 // - `scope :name, ...`: `name` in GeneratedRelationMethods (the class and its relations) and
 //   GeneratedAssociationRelationMethods, taking anything and returning the relation.
@@ -12,6 +14,12 @@
 //   prefix: true, **)` calling `enum(name, values, prefix:, **)`) declares enums too, with its own option defaults.
 // - `store_accessor :store, :key, ...`: the accessor and dirty-tracking methods of each key in
 //   GeneratedStoredAttributesMethods, named with its `prefix:` and `suffix:`.
+// - `attribute :name, :type` (a symbol, with `array:`), `serialize :name, coder:, type:`, `alias_attribute`,
+//   `self.ignored_columns = [...]` and `+= [...]`, and a class method of the app's that gives each name in its `*`
+//   parameter to `attribute` with a type (`def self.default_boolean_value(*fields, ...)`).
+//
+// Any other class method of the app's (in the model's chain, or a concern's `class_methods` block) that calls one of
+// these macros is an error where a class body calls it: the plugin can't see what it declares.
 //
 // A macro the plugin can't read (a name or values it would have to run code to know, a call inside a block) is an
 // error: the narrowed compilers in the app leave out every macro our code calls, so nothing else would write it. The
@@ -22,9 +30,11 @@
 
 #include "Inflector.h"
 #include "Rails.h"
+#include "Schema.h"
 
 #include "absl/algorithm/container.h"
 
+#include <functional>
 #include <map>
 #include <set>
 
@@ -127,6 +137,49 @@ Arguments splitArguments(const pm_call_node_t *call) {
     return out;
 }
 
+// The macros Rails and ActiveRecord give a model class whose methods or types the plugin writes.
+bool isModelMacro(string_view name) {
+    return name == "scope" || name == "enum" || name == "store_accessor" || name == "attribute" ||
+           name == "serialize" || name == "alias_attribute";
+}
+
+// The calls to model macros (on `self`, or with no receiver) anywhere in a node, but not in the methods, classes and
+// lambdas it defines.
+vector<const pm_call_node_t *> macroCalls(const RubyFile &file, const pm_node_t *node,
+                                          const function<bool(string_view)> &isMacro) {
+    struct Search {
+        const RubyFile *file;
+        const function<bool(string_view)> *isMacro;
+        vector<const pm_call_node_t *> found;
+    } search{&file, &isMacro, {}};
+    if (node == nullptr) {
+        return {};
+    }
+    pm_visit_node(
+        node,
+        [](const pm_node_t *node, void *data) -> bool {
+            auto search = static_cast<Search *>(data);
+            switch (PM_NODE_TYPE(node)) {
+                case PM_DEF_NODE:
+                case PM_CLASS_NODE:
+                case PM_MODULE_NODE:
+                case PM_SINGLETON_CLASS_NODE:
+                case PM_LAMBDA_NODE:
+                    return false;
+                default:
+                    break;
+            }
+            auto call = asCall(node);
+            if (call != nullptr && (call->receiver == nullptr || isSelf(call->receiver)) &&
+                (*search->isMacro)(callName(*search->file, call))) {
+                search->found.emplace_back(call);
+            }
+            return true;
+        },
+        &search);
+    return search.found;
+}
+
 // A class method of the app's that declares an enum: one that passes its first two parameters to `enum`.
 struct EnumMacro {
     struct Option {
@@ -136,12 +189,80 @@ struct EnumMacro {
     map<string, Option, less<>> options; // by `enum`'s option name
     set<string, less<>> parameters;      // the macro's keyword parameters
     bool passesRest = false;             // `**`: the caller's other options go on to `enum`
-    optional<string> problem;            // why the plugin can't read the macro
+    // `attribute(name, :type, ...)` in it (`attr_enum`'s `:integer`), and whether it comes before the `enum`.
+    optional<string> attributeType;
+    bool attributeFirst = false;
+    optional<string> problem; // why the plugin can't read the macro
 };
 
-// `def self.<name>(a, b, ...)` with a statement `enum(a, b, ...)`, or nullopt for any other method.
-optional<EnumMacro> readEnumMacro(const RubyFile &file, const pm_def_node_t *def) {
-    if (!isSelf(def->receiver) || def->parameters == nullptr || def->parameters->requireds.size < 2) {
+// A class method of the app's that declares attributes: `def self.<name>(*names, ...)` whose statement
+// `names.each do |name| ... end` has a statement `attribute name, :type, ...` (`default_boolean_value`).
+struct AttributeMacro {
+    string type;
+    const pm_call_node_t *call;
+};
+
+// The `attribute(name, :type, ...)` call's type: the call's first argument reads the local `name`, its second is a
+// symbol.
+optional<string> attributeTypeOf(const RubyFile &file, const pm_call_node_t *call, string_view name) {
+    auto args = splitArguments(call);
+    if (call->receiver != nullptr || callName(file, call) != "attribute" || args.positional.size() != 2 ||
+        readsLocal(file, args.positional[0]) != name || !PM_NODE_TYPE_P(args.positional[1], PM_SYMBOL_NODE) ||
+        !args.readable || !args.splats.empty()) {
+        return nullopt;
+    }
+    // `array:` and `range:` change the type.
+    for (auto &[key, value] : args.keywords) {
+        if (key == "array" || key == "range") {
+            return nullopt;
+        }
+    }
+    return nameLiteral(args.positional[1]);
+}
+
+optional<AttributeMacro> readAttributeMacro(const RubyFile &file, const pm_def_node_t *def, bool singleton) {
+    if (singleton != isSelf(def->receiver) || def->parameters == nullptr || def->parameters->rest == nullptr ||
+        !PM_NODE_TYPE_P(def->parameters->rest, PM_REST_PARAMETER_NODE)) {
+        return nullopt;
+    }
+    auto restName = reinterpret_cast<const pm_rest_parameter_node_t *>(def->parameters->rest)->name;
+    if (restName == 0) {
+        return nullopt;
+    }
+    auto names = file.name(restName);
+    for (auto stat : statements(def->body)) {
+        auto each = asCall(stat);
+        if (each == nullptr || callName(file, each) != "each" || readsLocal(file, each->receiver) != names ||
+            each->block == nullptr || !PM_NODE_TYPE_P(each->block, PM_BLOCK_NODE)) {
+            continue;
+        }
+        auto block = reinterpret_cast<const pm_block_node_t *>(each->block);
+        if (block->parameters == nullptr || !PM_NODE_TYPE_P(block->parameters, PM_BLOCK_PARAMETERS_NODE)) {
+            continue;
+        }
+        auto params = reinterpret_cast<const pm_block_parameters_node_t *>(block->parameters)->parameters;
+        if (params == nullptr || params->requireds.size != 1 ||
+            !PM_NODE_TYPE_P(params->requireds.nodes[0], PM_REQUIRED_PARAMETER_NODE)) {
+            continue;
+        }
+        auto name = file.name(reinterpret_cast<const pm_required_parameter_node_t *>(params->requireds.nodes[0])->name);
+        for (auto inner : statements(block->body)) {
+            auto call = asCall(inner);
+            if (call == nullptr) {
+                continue;
+            }
+            if (auto type = attributeTypeOf(file, call, name)) {
+                return AttributeMacro{*type, call};
+            }
+        }
+    }
+    return nullopt;
+}
+
+// `def self.<name>(a, b, ...)` with a statement `enum(a, b, ...)`, or nullopt for any other method. In a concern's
+// `class_methods` block, `def <name>`.
+optional<EnumMacro> readEnumMacro(const RubyFile &file, const pm_def_node_t *def, bool singleton) {
+    if (singleton != isSelf(def->receiver) || def->parameters == nullptr || def->parameters->requireds.size < 2) {
         return nullopt;
     }
     auto params = def->parameters;
@@ -154,23 +275,39 @@ optional<EnumMacro> readEnumMacro(const RubyFile &file, const pm_def_node_t *def
         (i == 0 ? first : second) = file.name(reinterpret_cast<const pm_required_parameter_node_t *>(param)->name);
     }
     const pm_call_node_t *call = nullptr;
+    const pm_call_node_t *attributeCall = nullptr;
+    EnumMacro macro;
     for (auto stat : statements(def->body)) {
         auto candidate = asCall(stat);
-        if (candidate == nullptr || candidate->receiver != nullptr || callName(file, candidate) != "enum") {
+        if (candidate == nullptr || candidate->receiver != nullptr) {
+            continue;
+        }
+        if (attributeCall == nullptr) {
+            if (auto type = attributeTypeOf(file, candidate, first)) {
+                attributeCall = candidate;
+                macro.attributeType = type;
+                macro.attributeFirst = call == nullptr;
+                continue;
+            }
+        }
+        if (call != nullptr || callName(file, candidate) != "enum") {
             continue;
         }
         auto args = splitArguments(candidate);
         if (args.positional.size() >= 2 && readsLocal(file, args.positional[0]) == first &&
             readsLocal(file, args.positional[1]) == second) {
             call = candidate;
-            break;
         }
     }
     if (call == nullptr) {
         return nullopt;
     }
+    for (auto other : macroCalls(file, def->body, isModelMacro)) {
+        if (other != call && other != attributeCall) {
+            macro.problem = fmt::format("it calls `{}` too", callName(file, other));
+        }
+    }
 
-    EnumMacro macro;
     map<string, Literal, less<>> defaults;
     for (size_t i = 0; i < params->keywords.size; i++) {
         auto keyword = params->keywords.nodes[i];
@@ -368,11 +505,27 @@ struct Enum {
     bool instanceMethods = true;
 };
 
+// A class method of the app's that calls model macros, as the plugin reads it.
+struct AppMacro {
+    optional<EnumMacro> enumMacro;
+    optional<AttributeMacro> attributeMacro;
+    optional<string> problem; // why the plugin can't read it
+};
+
+// `self.ignored_columns = [...]` (replaces its superclass's list) or `+= [...]`.
+struct IgnoredColumns {
+    bool replace;
+    vector<string> names;
+};
+
 // What one class body declares, with what its concerns' `included` blocks declare in it.
 struct ClassMacros {
     vector<string> scopes;
     vector<Enum> enums;
     vector<string> storeAccessors;
+    vector<AttributeChange> attributes;
+    vector<string> attributeSources; // for each change, the class or concern it's written in
+    vector<IgnoredColumns> ignoredColumns;
 };
 
 // Statements that run in a class body: its own, or an `included` block's, with the definition they're written in
@@ -384,8 +537,8 @@ struct Source {
 
 class Reader {
 public:
-    Reader(const App &app, const map<string, EnumMacro, less<>> &enumMacros, vector<MacroProblem> &problems)
-        : app(app), enumMacros(enumMacros), problems(problems) {}
+    Reader(const App &app, const map<string, AppMacro, less<>> &macros, vector<MacroProblem> &problems)
+        : app(app), macros(macros), problems(problems) {}
 
     ClassMacros read(const Definition &def) {
         ClassMacros out;
@@ -405,16 +558,36 @@ public:
 
 private:
     const App &app;
-    const map<string, EnumMacro, less<>> &enumMacros;
+    const map<string, AppMacro, less<>> &macros;
     vector<MacroProblem> &problems;
 
     void problem(const Definition &home, const pm_node_t *node, string message) {
         problems.emplace_back(MacroProblem{home.file, node, move(message)});
     }
 
+    void change(const Definition &home, const pm_call_node_t *call, ClassMacros &out, AttributeChange::Kind kind,
+                string name, string detail = "", bool array = false) {
+        out.attributes.emplace_back(AttributeChange{kind, move(name), move(detail), array, home.file,
+                                                    reinterpret_cast<const pm_node_t *>(call)});
+        out.attributeSources.emplace_back(join(home.fullName));
+    }
+
     void statement(const Definition &home, const pm_node_t *stat, ClassMacros &out) {
+        if (PM_NODE_TYPE_P(stat, PM_CALL_OPERATOR_WRITE_NODE)) {
+            auto write = reinterpret_cast<const pm_call_operator_write_node_t *>(stat);
+            if (isSelf(write->receiver) && home.file->name(write->read_name) == "ignored_columns") {
+                ignoredColumns(home, stat, write->value, false, "+=", out);
+                return;
+            }
+        }
         auto call = asCall(stat);
+        if (call != nullptr && isSelf(call->receiver) && callName(*home.file, call) == "ignored_columns=") {
+            auto args = arguments(call);
+            ignoredColumns(home, stat, args.size() == 1 ? args[0] : nullptr, true, "=", out);
+            return;
+        }
         auto name = call != nullptr && call->receiver == nullptr ? callName(*home.file, call) : "";
+        auto macro = name.empty() ? macros.end() : macros.find(name);
         if (name == "scope") {
             auto args = arguments(call);
             auto scope = args.empty() ? nullopt : nameLiteral(args[0]);
@@ -426,10 +599,30 @@ private:
             out.scopes.emplace_back(*scope);
         } else if (name == "enum") {
             enumCall(home, call, nullptr, out);
-        } else if (auto macro = enumMacros.find(name); !name.empty() && macro != enumMacros.end()) {
-            enumCall(home, call, &macro->second, out);
+        } else if (macro != macros.end()) {
+            if (macro->second.problem) {
+                problem(home, stat, fmt::format("can't read `{}`'s definition: {}", name, *macro->second.problem));
+            } else if (macro->second.enumMacro) {
+                enumCall(home, call, &*macro->second.enumMacro, out);
+            } else {
+                attributeMacroCall(home, call, *macro->second.attributeMacro, out);
+            }
         } else if (name == "store_accessor") {
             storeAccessor(home, call, out);
+        } else if (name == "attribute") {
+            attributeCall(home, call, out);
+        } else if (name == "serialize") {
+            serializeCall(home, call, out);
+        } else if (name == "alias_attribute") {
+            auto args = splitArguments(call);
+            auto alias = args.positional.size() == 2 ? nameLiteral(args.positional[0]) : nullopt;
+            auto old = args.positional.size() == 2 ? nameLiteral(args.positional[1]) : nullopt;
+            if (!alias || !old) {
+                problem(home, stat,
+                        "can't read this `alias_attribute`: the plugin reads names that are symbols or strings");
+                return;
+            }
+            change(home, call, out, AttributeChange::Kind::Alias, *alias, *old);
         } else {
             nested(home, stat);
         }
@@ -437,41 +630,153 @@ private:
 
     // A macro call inside another statement (a block, an `if`): Rails runs it, but the plugin doesn't read it.
     void nested(const Definition &home, const pm_node_t *stat) {
-        struct Search {
-            const RubyFile *file;
-            const map<string, EnumMacro, less<>> *enumMacros;
-            vector<const pm_call_node_t *> found;
-        } search{home.file.get(), &enumMacros, {}};
-        pm_visit_node(
-            stat,
-            [](const pm_node_t *node, void *data) -> bool {
-                auto search = static_cast<Search *>(data);
-                switch (PM_NODE_TYPE(node)) {
-                    case PM_DEF_NODE:
-                    case PM_CLASS_NODE:
-                    case PM_MODULE_NODE:
-                    case PM_SINGLETON_CLASS_NODE:
-                    case PM_LAMBDA_NODE:
-                        return false;
-                    default:
-                        break;
-                }
-                auto call = asCall(node);
-                if (call != nullptr && call->receiver == nullptr) {
-                    auto name = callName(*search->file, call);
-                    if (name == "scope" || name == "enum" || name == "store_accessor" ||
-                        search->enumMacros->contains(name)) {
-                        search->found.emplace_back(call);
-                    }
-                }
-                return true;
-            },
-            &search);
-        for (auto call : search.found) {
+        auto isMacro = [&](string_view name) { return isModelMacro(name) || macros.contains(name); };
+        for (auto call : macroCalls(*home.file, stat, isMacro)) {
             problem(home, reinterpret_cast<const pm_node_t *>(call),
                     fmt::format("can't read `{}` here: the plugin reads it only directly in a class body or a "
                                 "concern's `included` block",
                                 callName(*home.file, call)));
+        }
+    }
+
+    void ignoredColumns(const Definition &home, const pm_node_t *stat, const pm_node_t *value, bool replace,
+                        string_view written, ClassMacros &out) {
+        IgnoredColumns ignored{replace, {}};
+        auto readable = value != nullptr && PM_NODE_TYPE_P(value, PM_ARRAY_NODE);
+        if (readable) {
+            auto &elements = reinterpret_cast<const pm_array_node_t *>(value)->elements;
+            for (size_t i = 0; i < elements.size && readable; i++) {
+                auto name = nameLiteral(elements.nodes[i]);
+                readable = name.has_value();
+                if (name) {
+                    ignored.names.emplace_back(*name);
+                }
+            }
+        }
+        if (!readable) {
+            problem(home, stat,
+                    fmt::format("can't read `self.ignored_columns {}`: the plugin reads an array of strings or symbols",
+                                written));
+            return;
+        }
+        out.ignoredColumns.emplace_back(move(ignored));
+    }
+
+    void attributeCall(const Definition &home, const pm_call_node_t *call, ClassMacros &out) {
+        auto node = reinterpret_cast<const pm_node_t *>(call);
+        auto args = splitArguments(call);
+        auto name = args.positional.empty() ? nullopt : nameLiteral(args.positional[0]);
+        if (!name || args.positional.size() > 2 || !args.readable || !args.splats.empty()) {
+            problem(home, node,
+                    "can't read this `attribute`: the plugin reads a name that's a symbol or string, a type that's a "
+                    "symbol, and options written out (`key: value`)");
+            return;
+        }
+        if (args.positional.size() == 1) {
+            change(home, call, out, AttributeChange::Kind::Declare, *name);
+            return;
+        }
+        auto type = PM_NODE_TYPE_P(args.positional[1], PM_SYMBOL_NODE) ? nameLiteral(args.positional[1]) : nullopt;
+        if (!type) {
+            problem(home, node,
+                    fmt::format("can't read the type of `attribute :{}`: the plugin reads a type that's a symbol "
+                                "(`:boolean`)",
+                                *name));
+            return;
+        }
+        if (!knownAttributeType(*type)) {
+            problem(home, node,
+                    fmt::format("doesn't type `attribute :{}, :{}`: the plugin writes the types of the column types it "
+                                "reads from db/structure.sql",
+                                *name, *type));
+            return;
+        }
+        bool array = false;
+        for (auto &[key, value] : args.keywords) {
+            if (key != "array" && key != "range") {
+                continue;
+            }
+            auto option = literal(value);
+            if (option.kind != Literal::Kind::True && option.kind != Literal::Kind::False &&
+                option.kind != Literal::Kind::Nil) {
+                problem(home, node,
+                        fmt::format("can't read `{}:` of `attribute :{}`: the plugin reads `true` or "
+                                    "`false`",
+                                    key, *name));
+                return;
+            }
+            if (key == "range" && option.kind == Literal::Kind::True) {
+                problem(home, node, fmt::format("doesn't type `attribute :{}` with `range: true`", *name));
+                return;
+            }
+            array = key == "array" ? option.kind == Literal::Kind::True : array;
+        }
+        change(home, call, out, AttributeChange::Kind::Type, *name, *type, array);
+    }
+
+    // `serialize :name, coder: ..., type: ...`. Without `coder:`, Rails uses `default_column_serializer`, which the
+    // narrowed compiler in the app checks is YAML.
+    void serializeCall(const Definition &home, const pm_call_node_t *call, ClassMacros &out) {
+        auto node = reinterpret_cast<const pm_node_t *>(call);
+        auto args = splitArguments(call);
+        auto name = args.positional.size() == 1 ? nameLiteral(args.positional[0]) : nullopt;
+        if (!name || !args.readable || !args.splats.empty()) {
+            problem(home, node,
+                    "can't read this `serialize`: the plugin reads a name that's a symbol or string, and options "
+                    "written out (`key: value`)");
+            return;
+        }
+        auto constant = [&](const pm_node_t *value) -> optional<string> {
+            auto ref = constantRef(*home.file, value);
+            return ref ? optional<string>(join(ref->name)) : nullopt;
+        };
+        bool yaml = true;
+        string type = "Object";
+        for (auto &[key, value] : args.keywords) {
+            if (key == "coder") {
+                auto coder = constant(value);
+                if (coder == "YAML" || coder == "ActiveRecord::Coders::YAMLColumn") {
+                    yaml = true;
+                } else if (coder == "JSON" || coder == "ActiveRecord::Coders::JSON") {
+                    yaml = false;
+                } else {
+                    problem(home, node,
+                            fmt::format("can't read `coder:` of `serialize :{}`: the plugin reads `YAML` or `JSON`",
+                                        *name));
+                    return;
+                }
+            } else if (key == "type") {
+                auto given = constant(value);
+                if (!given) {
+                    problem(
+                        home, node,
+                        fmt::format("can't read `type:` of `serialize :{}`: the plugin reads a class's name", *name));
+                    return;
+                }
+                type = *given;
+            }
+        }
+        change(home, call, out, AttributeChange::Kind::Declare, *name);
+        change(home, call, out, AttributeChange::Kind::Serialize, *name,
+               yaml && (type == "Array" || type == "Hash") ? type : "");
+    }
+
+    void attributeMacroCall(const Definition &home, const pm_call_node_t *call, const AttributeMacro &macro,
+                            ClassMacros &out) {
+        auto args = splitArguments(call);
+        vector<string> names;
+        for (auto arg : args.positional) {
+            auto name = nameLiteral(arg);
+            if (!name) {
+                problem(home, reinterpret_cast<const pm_node_t *>(call),
+                        fmt::format("can't read this `{}`: the plugin reads names that are symbols or strings",
+                                    callName(*home.file, call)));
+                return;
+            }
+            names.emplace_back(*name);
+        }
+        for (auto &name : names) {
+            change(home, call, out, AttributeChange::Kind::Type, name, macro.type);
         }
     }
 
@@ -572,6 +877,16 @@ private:
             result.methodNames.emplace_back(move(method));
         }
         out.enums.emplace_back(move(result));
+
+        // The attribute: the macro's `attribute` call, then `enum`'s own (which keeps the type) and its decorator.
+        auto typed = macro != nullptr && macro->attributeType;
+        if (typed && macro->attributeFirst) {
+            change(home, call, out, AttributeChange::Kind::Type, *name, *macro->attributeType);
+        }
+        change(home, call, out, AttributeChange::Kind::Enum, *name);
+        if (typed && !macro->attributeFirst) {
+            change(home, call, out, AttributeChange::Kind::Type, *name, *macro->attributeType);
+        }
     }
 
     void storeAccessor(const Definition &home, const pm_call_node_t *call, ClassMacros &out) {
@@ -642,24 +957,92 @@ void addUnique(vector<string> &list, set<string> &seen, const string &name) {
 
 } // namespace
 
-string modelMacros(const App &app, const Model &model, const Inflector &inflector, vector<MacroProblem> &problems) {
-    // The app's enum macros, from the class methods of the model and its superclasses.
-    map<string, EnumMacro, less<>> enumMacros;
+string modelMacros(const App &app, const Model &model, const Inflector &inflector, const Table &table,
+                   const optional<string> &primaryKey, vector<MacroProblem> &problems) {
+    // The app's own macros: the class methods of the model and its superclasses, and of the concerns they include
+    // (`class_methods` blocks), that call model macros. The nearest definition of a name wins.
+    map<string, AppMacro, less<>> macros;
+    auto addMacros = [&](const RubyFile &file, const vector<const pm_node_t *> &stats, bool singleton) {
+        for (auto stat : stats) {
+            if (!PM_NODE_TYPE_P(stat, PM_DEF_NODE)) {
+                continue;
+            }
+            auto method = reinterpret_cast<const pm_def_node_t *>(stat);
+            auto name = string(file.name(method->name));
+            auto calls = macroCalls(file, method->body, isModelMacro);
+            if (singleton != isSelf(method->receiver) || calls.empty() || macros.contains(name)) {
+                continue;
+            }
+            AppMacro macro;
+            if (auto enumMacro = readEnumMacro(file, method, singleton)) {
+                macro.enumMacro = move(*enumMacro);
+            } else if (auto attributeMacro = readAttributeMacro(file, method, singleton)) {
+                for (auto call : calls) {
+                    if (call != attributeMacro->call) {
+                        macro.problem = fmt::format("it calls `{}` too", callName(file, call));
+                    }
+                }
+                macro.attributeMacro = *attributeMacro;
+            } else {
+                macro.problem = fmt::format("it calls `{}`, and the plugin reads only a method that passes its first "
+                                            "two parameters to `enum`, or one that gives each name in its `*` "
+                                            "parameter to `attribute` with a type",
+                                            callName(file, calls.front()));
+            }
+            macros.emplace(name, move(macro));
+        }
+    };
     for (auto &def : model.chain) {
-        for (auto stat : def.body) {
-            if (PM_NODE_TYPE_P(stat, PM_DEF_NODE)) {
-                auto method = reinterpret_cast<const pm_def_node_t *>(stat);
-                if (auto macro = readEnumMacro(*def.file, method)) {
-                    enumMacros.emplace(def.file->name(method->name), move(*macro));
+        addMacros(*def.file, def.body, true);
+    }
+    for (auto &def : model.chain) {
+        for (auto &concern : includedConcerns(app, def)) {
+            for (auto stat : concern.body) {
+                auto call = asCall(stat);
+                if (call != nullptr && call->receiver == nullptr && callName(*concern.file, call) == "class_methods" &&
+                    call->block != nullptr && PM_NODE_TYPE_P(call->block, PM_BLOCK_NODE)) {
+                    addMacros(*concern.file, statements(reinterpret_cast<const pm_block_node_t *>(call->block)->body),
+                              false);
                 }
             }
         }
     }
 
-    Reader reader(app, enumMacros, problems);
+    Reader reader(app, macros, problems);
     vector<ClassMacros> classes;
     for (auto &def : model.chain) {
         classes.emplace_back(reader.read(def));
+    }
+
+    // Attributes: Rails applies a superclass's changes first, and each class's in order. The plugin reads a class's
+    // body before its concerns' `included` blocks, which Rails runs where the `include` is, so an attribute that both
+    // change is an error.
+    vector<AttributeChange> changes;
+    set<string, less<>> ignoredColumns;
+    for (auto declared = classes.rbegin(); declared != classes.rend(); declared++) {
+        map<string, string, less<>> changedIn;
+        set<string, less<>> reported;
+        for (size_t i = 0; i < declared->attributes.size(); i++) {
+            auto &change = declared->attributes[i];
+            auto &source = declared->attributeSources[i];
+            if (change.kind != AttributeChange::Kind::Declare && change.kind != AttributeChange::Kind::Alias) {
+                auto [first, added] = changedIn.emplace(change.name, source);
+                if (!added && first->second != source && reported.insert(change.name).second) {
+                    problems.emplace_back(MacroProblem{
+                        change.file, change.node,
+                        fmt::format("can't type `{}`: `{}` changes its type too, and the plugin doesn't know which "
+                                    "runs first (a concern's `included` block runs at its `include`)",
+                                    change.name, first->second)});
+                }
+            }
+            changes.emplace_back(change);
+        }
+        for (auto &ignored : declared->ignoredColumns) {
+            if (ignored.replace) {
+                ignoredColumns.clear();
+            }
+            ignoredColumns.insert(ignored.names.begin(), ignored.names.end());
+        }
     }
 
     // Scopes and enum mappings: the whole chain's. Enum methods and store accessors: the model's own.
@@ -732,8 +1115,10 @@ string modelMacros(const App &app, const Model &model, const Inflector &inflecto
                                "  sig {{ returns(T.untyped) }}\n  def {0}_before_last_save; end\n\n",
                                key);
         }
-        out += "end\n";
+        out += "end\n\n";
     }
+
+    out += attributeMethods(model, table, primaryKey, ignoredColumns, changes, problems);
     return out;
 }
 

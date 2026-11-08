@@ -1,6 +1,7 @@
 // Models: the methods Tapioca's ActiveRecordRelations compiler wrote for every model (`where`, `find`, the relation
-// classes), from the relations template (templates/relations.rbi) with the model's name and primary key type, and
-// the methods of the scopes, enums and store accessors in its code (ModelMacros.cc).
+// classes), from the relations template (templates/relations.rbi) with the model's name and primary key type, the
+// methods of the scopes, enums and store accessors in its code (ModelMacros.cc), and its attributes' methods
+// (ModelColumns.cc).
 //
 // A model is a class in an app file whose superclass chain reaches ActiveRecord::Base through the app's own classes
 // (ApplicationRecord, an STI parent), and isn't abstract. A class with a gem's superclass (`< Audited::Audit`) isn't
@@ -124,8 +125,9 @@ static optional<string> tableName(const Model &model, const Inflector &inflector
     return inflector.pluralize(inflector.underscore(base.fullName.back()));
 }
 
-// `T::Array[...]`'s element type for `ids`: the primary key's type as Tapioca writes it, or an error message.
-static optional<string> idType(const Model &model, const Table &table, string &error) {
+// The primary key column: `self.primary_key =` in the class or a superclass, or the table's. nullopt for a table
+// without one; `error` is set for a composite key or a column the table doesn't have.
+static optional<string> primaryKeyColumn(const Model &model, const Table &table, string &error) {
     optional<string> primaryKey;
     for (size_t i = 0; i < model.chain.size() && !primaryKey; i++) {
         primaryKey = literalSetting(model.chain[i], "primary_key", error);
@@ -135,18 +137,25 @@ static optional<string> idType(const Model &model, const Table &table, string &e
     }
     vector<string> columns = primaryKey ? vector<string>{*primaryKey} : table.primaryKey;
     if (columns.empty()) {
-        return "T.untyped";
+        return nullopt;
     }
     if (columns.size() > 1) {
         error = "doesn't type models with a composite primary key";
         return nullopt;
     }
-    auto column = table.column(columns[0]);
-    if (column == nullptr) {
+    if (table.column(columns[0]) == nullptr) {
         error = fmt::format("can't find the primary key column `{}` in db/structure.sql", columns[0]);
         return nullopt;
     }
-    auto &type = column->sqlType;
+    return columns[0];
+}
+
+// `T::Array[...]`'s element type for `ids`: the primary key's type as Tapioca writes it, or an error message.
+static optional<string> idType(const Table &table, const optional<string> &primaryKey, string &error) {
+    if (!primaryKey) {
+        return "T.untyped";
+    }
+    auto &type = table.column(*primaryKey)->sqlType;
     if (type == "bigint" || type == "integer" || type == "smallint") {
         return "::Integer";
     }
@@ -207,7 +216,8 @@ void rewriteModels(core::MutableContext ctx, ast::ClassDef &root, const App &app
             reportError(ctx, loc, fmt::format("can't find the table `{}` in db/structure.sql", *table));
             continue;
         }
-        auto ids = idType(*model, found->second, error);
+        auto primaryKey = primaryKeyColumn(*model, found->second, error);
+        auto ids = error.empty() ? idType(found->second, primaryKey, error) : nullopt;
         if (!ids) {
             reportError(ctx, loc, error);
             continue;
@@ -217,7 +227,7 @@ void rewriteModels(core::MutableContext ctx, ast::ClassDef &root, const App &app
         addTemplate(ctx, loc, tree->rhs, move(source), "relations");
 
         vector<MacroProblem> problems;
-        auto macros = modelMacros(app, *model, *inflector, problems);
+        auto macros = modelMacros(app, *model, *inflector, found->second, primaryKey, problems);
         for (auto &problem : problems) {
             if (problem.file->path == file->path) {
                 auto [begin, end] = file->offsets(problem.node);
