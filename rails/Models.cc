@@ -1,7 +1,7 @@
 // Models: the methods Tapioca's ActiveRecordRelations compiler wrote for every model (`where`, `find`, the relation
 // classes), from the relations template (templates/relations.rbi) with the model's name and primary key type, the
-// methods of the scopes, enums and store accessors in its code (ModelMacros.cc), and its attributes' methods
-// (ModelColumns.cc).
+// methods of the scopes, enums and store accessors in its code (ModelMacros.cc), its associations' methods
+// (ModelAssociations.cc), and its attributes' methods (ModelColumns.cc).
 //
 // A model is a class in an app file whose superclass chain reaches ActiveRecord::Base through the app's own classes
 // (ApplicationRecord, an STI parent), and isn't abstract. A class with a gem's superclass (`< Audited::Audit`) isn't

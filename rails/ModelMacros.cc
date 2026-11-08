@@ -1,8 +1,8 @@
 // Model macros: the methods Tapioca's ActiveRecordScope, ActiveRecordEnum and ActiveRecordStore compilers wrote for
-// the `scope`, `enum` and `store_accessor` calls in a model's own code, and the changes the `attribute`, `enum`,
-// `serialize`, `alias_attribute` and `ignored_columns` calls make to its attributes (ModelColumns.cc writes those). The
-// plugin reads them from the class bodies of the model and its superclasses, and from the `included` blocks of the app
-// concerns each one includes.
+// the `scope`, `enum` and `store_accessor` calls in a model's own code, the changes the `attribute`, `enum`,
+// `serialize`, `alias_attribute` and `ignored_columns` calls make to its attributes (ModelColumns.cc writes those), and
+// its associations (ModelAssociations.cc writes those). The plugin reads them from the class bodies of the model and
+// its superclasses, and from the `included` blocks of the app concerns each one includes.
 //
 // - `scope :name, ...`: `name` in GeneratedRelationMethods (the class and its relations) and
 //   GeneratedAssociationRelationMethods, taking anything and returning the relation.
@@ -17,6 +17,9 @@
 // - `attribute :name, :type` (a symbol, with `array:`), `serialize :name, coder:, type:`, `alias_attribute`,
 //   `self.ignored_columns = [...]` and `+= [...]`, and a class method of the app's that gives each name in its `*`
 //   parameter to `attribute` with a type (`def self.default_boolean_value(*fields, ...)`).
+// - `belongs_to`, `has_one`, `has_many` and `has_and_belongs_to_many` with a literal name and literal `class_name:`,
+//   `through:`, `source:`, `source_type:` and `polymorphic:` options, and `accepts_nested_attributes_for` with literal
+//   names. A name that a class body and a concern's `included` block both declare, with other options, is an error.
 //
 // Any other class method of the app's (in the model's chain, or a concern's `class_methods` block) that calls one of
 // these macros is an error where a class body calls it: the plugin can't see what it declares.
@@ -140,7 +143,24 @@ Arguments splitArguments(const pm_call_node_t *call) {
 // The macros Rails and ActiveRecord give a model class whose methods or types the plugin writes.
 bool isModelMacro(string_view name) {
     return name == "scope" || name == "enum" || name == "store_accessor" || name == "attribute" ||
-           name == "serialize" || name == "alias_attribute";
+           name == "serialize" || name == "alias_attribute" || name == "belongs_to" || name == "has_one" ||
+           name == "has_many" || name == "has_and_belongs_to_many" || name == "accepts_nested_attributes_for";
+}
+
+optional<Association::Macro> associationMacro(string_view name) {
+    if (name == "belongs_to") {
+        return Association::Macro::BelongsTo;
+    }
+    if (name == "has_one") {
+        return Association::Macro::HasOne;
+    }
+    if (name == "has_many") {
+        return Association::Macro::HasMany;
+    }
+    if (name == "has_and_belongs_to_many") {
+        return Association::Macro::HasAndBelongsToMany;
+    }
+    return nullopt;
 }
 
 // The calls to model macros (on `self`, or with no receiver) anywhere in a node, but not in the methods, classes and
@@ -526,6 +546,9 @@ struct ClassMacros {
     vector<AttributeChange> attributes;
     vector<string> attributeSources; // for each change, the class or concern it's written in
     vector<IgnoredColumns> ignoredColumns;
+    vector<Association> associations;
+    vector<string> associationSources; // the same
+    vector<string> nestedAttributes;
 };
 
 // Statements that run in a class body: its own, or an `included` block's, with the definition they're written in
@@ -540,7 +563,10 @@ public:
     Reader(const App &app, const map<string, AppMacro, less<>> &macros, vector<MacroProblem> &problems)
         : app(app), macros(macros), problems(problems) {}
 
-    ClassMacros read(const Definition &def) {
+    // The macros of the class at `level` in the model's chain.
+    ClassMacros read(const Definition &def, size_t level) {
+        owner = &def;
+        this->level = level;
         ClassMacros out;
         vector<Source> sources{{def, def.body}};
         for (auto &concern : includedConcerns(app, def)) {
@@ -560,6 +586,8 @@ private:
     const App &app;
     const map<string, AppMacro, less<>> &macros;
     vector<MacroProblem> &problems;
+    const Definition *owner = nullptr; // the class being read
+    size_t level = 0;
 
     void problem(const Definition &home, const pm_node_t *node, string message) {
         problems.emplace_back(MacroProblem{home.file, node, move(message)});
@@ -623,9 +651,87 @@ private:
                 return;
             }
             change(home, call, out, AttributeChange::Kind::Alias, *alias, *old);
+        } else if (auto association = associationMacro(name)) {
+            associationCall(home, call, *association, out);
+        } else if (name == "accepts_nested_attributes_for") {
+            vector<string> names;
+            for (auto arg : splitArguments(call).positional) {
+                auto attribute = nameLiteral(arg);
+                if (!attribute) {
+                    names.clear();
+                    break;
+                }
+                names.emplace_back(*attribute);
+            }
+            if (names.empty()) {
+                problem(home, stat,
+                        "can't read this `accepts_nested_attributes_for`: the plugin reads names that are symbols or "
+                        "strings");
+                return;
+            }
+            out.nestedAttributes.insert(out.nestedAttributes.end(), names.begin(), names.end());
         } else {
             nested(home, stat);
         }
+    }
+
+    void associationCall(const Definition &home, const pm_call_node_t *call, Association::Macro macro,
+                         ClassMacros &out) {
+        auto node = reinterpret_cast<const pm_node_t *>(call);
+        auto args = splitArguments(call);
+        auto name = args.positional.empty() ? nullopt : nameLiteral(args.positional[0]);
+        if (!name) {
+            problem(home, node,
+                    fmt::format("can't read this `{}`: the plugin reads an association whose name is a symbol or "
+                                "string",
+                                callName(*home.file, call)));
+            return;
+        }
+        Association association{.macro = macro, .name = *name, .node = node};
+        association.owner = owner->fullName;
+        association.level = level;
+        association.file = home.file;
+        auto declaration = association.declaration();
+        // The second positional argument is the scope (a lambda).
+        if (args.positional.size() > 2 ||
+            (args.positional.size() == 2 && PM_NODE_TYPE_P(args.positional[1], PM_HASH_NODE)) || !args.readable ||
+            !args.splats.empty()) {
+            problem(home, node,
+                    fmt::format("can't read the options of `{}`: the plugin reads `key: value` options with symbol "
+                                "keys",
+                                declaration));
+            return;
+        }
+        for (auto &[key, value] : args.keywords) {
+            if (key == "class_name" || key == "through" || key == "source" || key == "source_type") {
+                auto text = nameLiteral(value);
+                if (!text) {
+                    problem(
+                        home, node,
+                        fmt::format("can't read `{}:` of `{}`: the plugin reads a string or symbol", key, declaration));
+                    return;
+                }
+                auto &option = key == "class_name" ? association.className
+                               : key == "through"  ? association.through
+                               : key == "source"   ? association.source
+                                                   : association.sourceType;
+                option = *text;
+            } else if (key == "polymorphic") {
+                auto kind = literal(value).kind;
+                if (kind != Literal::Kind::True && kind != Literal::Kind::False && kind != Literal::Kind::Nil) {
+                    problem(home, node,
+                            fmt::format("can't read `polymorphic:` of `{}`: the plugin reads `true` or `false`",
+                                        declaration));
+                    return;
+                }
+                association.polymorphic = kind == Literal::Kind::True;
+            } else if (key == "anonymous_class") {
+                problem(home, node, fmt::format("doesn't type `anonymous_class:` (`{}`)", declaration));
+                return;
+            }
+        }
+        out.associations.emplace_back(move(association));
+        out.associationSources.emplace_back(join(home.fullName));
     }
 
     // A macro call inside another statement (a block, an `if`): Rails runs it, but the plugin doesn't read it.
@@ -955,10 +1061,50 @@ void addUnique(vector<string> &list, set<string> &seen, const string &name) {
     }
 }
 
-} // namespace
+bool sameTypes(const Association &a, const Association &b) {
+    return a.macro == b.macro && a.className == b.className && a.polymorphic == b.polymorphic &&
+           a.through == b.through && a.source == b.source && a.sourceType == b.sourceType;
+}
 
-string modelMacros(const App &app, const Model &model, const Inflector &inflector, const Table &table,
-                   const optional<string> &primaryKey, vector<MacroProblem> &problems) {
+// The associations the classes declare, as Rails has them: a superclass's first, and each class's in order. The
+// plugin reads a class's body before its concerns' `included` blocks, which Rails runs where the `include` is, so a
+// name that both declare differently is an error.
+ModelAssociations associationsOf(const Model &model, const vector<ClassMacros> &classes,
+                                 vector<MacroProblem> &problems) {
+    ModelAssociations out{model, vector<map<string, Association, less<>>>(classes.size()), {}};
+    map<string, Association, less<>> current;
+    set<string> seenNested;
+    for (auto level = classes.size(); level-- > 0;) {
+        auto &declared = classes[level];
+        map<string, size_t, less<>> declaredAt;
+        set<string, less<>> reported;
+        for (size_t i = 0; i < declared.associations.size(); i++) {
+            auto &association = declared.associations[i];
+            auto [first, added] = declaredAt.emplace(association.name, i);
+            if (!added) {
+                auto &firstSource = declared.associationSources[first->second];
+                if (firstSource != declared.associationSources[i] &&
+                    !sameTypes(declared.associations[first->second], association) &&
+                    reported.insert(association.name).second) {
+                    problems.emplace_back(MacroProblem{
+                        association.file, association.node,
+                        fmt::format("can't type `{}`: `{}` declares it too, and the plugin doesn't know which runs "
+                                    "first (a concern's `included` block runs at its `include`)",
+                                    association.name, firstSource)});
+                }
+            }
+            current.insert_or_assign(association.name, association);
+        }
+        for (auto &name : declared.nestedAttributes) {
+            addUnique(out.nestedAttributes, seenNested, name);
+        }
+        out.levels[level] = current;
+    }
+    return out;
+}
+
+// What each class of the model's chain declares, the model first.
+vector<ClassMacros> readClasses(const App &app, const Model &model, vector<MacroProblem> &problems) {
     // The app's own macros: the class methods of the model and its superclasses, and of the concerns they include
     // (`class_methods` blocks), that call model macros. The nearest definition of a name wins.
     map<string, AppMacro, less<>> macros;
@@ -1010,9 +1156,21 @@ string modelMacros(const App &app, const Model &model, const Inflector &inflecto
 
     Reader reader(app, macros, problems);
     vector<ClassMacros> classes;
-    for (auto &def : model.chain) {
-        classes.emplace_back(reader.read(def));
+    for (size_t level = 0; level < model.chain.size(); level++) {
+        classes.emplace_back(reader.read(model.chain[level], level));
     }
+    return classes;
+}
+
+} // namespace
+
+ModelAssociations modelAssociations(const App &app, const Model &model, vector<MacroProblem> &problems) {
+    return associationsOf(model, readClasses(app, model, problems), problems);
+}
+
+string modelMacros(const App &app, const Model &model, const Inflector &inflector, const Table &table,
+                   const optional<string> &primaryKey, vector<MacroProblem> &problems) {
+    auto classes = readClasses(app, model, problems);
 
     // Attributes: Rails applies a superclass's changes first, and each class's in order. The plugin reads a class's
     // body before its concerns' `included` blocks, which Rails runs where the `include` is, so an attribute that both
@@ -1118,6 +1276,7 @@ string modelMacros(const App &app, const Model &model, const Inflector &inflecto
         out += "end\n\n";
     }
 
+    out += associationMethods(app, inflector, associationsOf(model, classes, problems), problems);
     out += attributeMethods(model, table, primaryKey, ignoredColumns, changes, problems);
     return out;
 }

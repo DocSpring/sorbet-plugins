@@ -107,6 +107,30 @@ CREATE TABLE public.audits (
     id bigint NOT NULL
 );
 
+CREATE TABLE public.posts (
+    id bigint NOT NULL
+);
+
+CREATE TABLE public.comments (
+    id bigint NOT NULL
+);
+
+CREATE TABLE public.tags (
+    id bigint NOT NULL
+);
+
+CREATE TABLE public.items (
+    id bigint NOT NULL
+);
+
+CREATE TABLE public.carts (
+    id bigint NOT NULL
+);
+
+CREATE TABLE public.shop_carts (
+    id bigint NOT NULL
+);
+
 ALTER TABLE ONLY public.widgets
     ADD CONSTRAINT widgets_pkey PRIMARY KEY (id);
 
@@ -139,3 +163,21 @@ ALTER TABLE ONLY public.pairs
 
 ALTER TABLE ONLY public.audits
     ADD CONSTRAINT audits_pkey PRIMARY KEY (id);
+
+ALTER TABLE ONLY public.posts
+    ADD CONSTRAINT posts_pkey PRIMARY KEY (id);
+
+ALTER TABLE ONLY public.comments
+    ADD CONSTRAINT comments_pkey PRIMARY KEY (id);
+
+ALTER TABLE ONLY public.tags
+    ADD CONSTRAINT tags_pkey PRIMARY KEY (id);
+
+ALTER TABLE ONLY public.items
+    ADD CONSTRAINT items_pkey PRIMARY KEY (id);
+
+ALTER TABLE ONLY public.carts
+    ADD CONSTRAINT carts_pkey PRIMARY KEY (id);
+
+ALTER TABLE ONLY public.shop_carts
+    ADD CONSTRAINT shop_carts_pkey PRIMARY KEY (id);

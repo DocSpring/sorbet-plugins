@@ -16,6 +16,9 @@ class Widget < ApplicationRecord
   enum :tone, Palette::TONES, prefix: true
   suffixed_enum :finish, { matte: 0, gloss: 1 }
   enum :rank, { low: 0, high: 'high' }
+
+  belongs_to :category, optional: true
+  has_many :comments, as: :subject
 end
 
 T.reveal_type(Widget.ids) # error: Revealed type: `T::Array[Integer]`

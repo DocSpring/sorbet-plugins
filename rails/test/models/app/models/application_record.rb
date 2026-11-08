@@ -24,7 +24,12 @@ class ApplicationRecord < ActiveRecord::Base
     end
   end
 
-  # A macro the plugin can't read: it would have to run the code to know the name.
+  # A macro the plugin can't read: it would have to run the code to know what it declares.
+  def self.has_versions
+    has_many :versions
+  end
+
+  # Nor this one.
   def self.text_attribute(name)
     attribute(:"#{name}_text", :string)
   end

@@ -16,6 +16,11 @@ module ActiveRecord
     def self.ignored_columns; end
     def self.ignored_columns=(columns); end
     def self.define_method(name, &block); end
+    def self.belongs_to(name, scope = nil, **options, &extension); end
+    def self.has_one(name, scope = nil, **options, &extension); end
+    def self.has_many(name, scope = nil, **options, &extension); end
+    def self.has_and_belongs_to_many(name, scope = nil, **options, &extension); end
+    def self.accepts_nested_attributes_for(*attr_names); end
     def [](name); end
   end
 
