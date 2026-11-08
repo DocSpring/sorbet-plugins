@@ -11,6 +11,7 @@ module ActionMailer
     def self.helper(*args, &block); end
     def self.helper_method(*names); end
   end
+  class MessageDelivery; end
 end
 module ActionView
   class Base

@@ -33,7 +33,8 @@ struct Param {
     std::string name;
 };
 
-// A method's parameters, or nullopt if one has no name (`*`, `**`, `&`, `...`).
+// A method's parameters, or nullopt for one the plugin doesn't copy (`...`, a destructured parameter, `**nil`).
+// An anonymous `*`, `**` or `&` is named as Sorbet names it.
 std::optional<std::vector<Param>> readParams(const RubyFile &file, const pm_parameters_node_t *params);
 // A parameter for a synthesized method, with `T.unsafe(nil)` for any default, as Tapioca writes them.
 ast::ExpressionPtr paramTree(core::MutableContext ctx, core::LocOffsets loc, const Param &param);

@@ -111,6 +111,10 @@ struct Definition {
         const pm_call_node_t *sig;
     };
     std::optional<Method> method(std::string_view name, bool singleton = false) const;
+    // The instance methods the body defines that it leaves public, in order, with their names: each `def` outside a
+    // `private` or `protected` section, unless `private def` wraps it or a later `private :name` (or `protected`)
+    // names it.
+    std::vector<std::pair<std::string, Method>> publicMethods() const;
 };
 
 std::vector<Definition> definitions(const std::shared_ptr<RubyFile> &file);

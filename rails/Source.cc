@@ -407,6 +407,77 @@ optional<Definition::Method> Definition::method(string_view name, bool singleton
     return findMethodIn(*file, body, name, singleton);
 }
 
+vector<pair<string, Definition::Method>> Definition::publicMethods() const {
+    enum class Visibility { Public, Private, Protected };
+    auto visibilityOf = [](string_view name) -> optional<Visibility> {
+        if (name == "public") {
+            return Visibility::Public;
+        }
+        if (name == "private") {
+            return Visibility::Private;
+        }
+        if (name == "protected") {
+            return Visibility::Protected;
+        }
+        return nullopt;
+    };
+    vector<string> order;
+    unordered_map<string, pair<Visibility, Method>> methods;
+    auto define = [&](const pm_def_node_t *def, const pm_call_node_t *sig, Visibility visibility) {
+        auto name = string(file->name(def->name));
+        if (!methods.contains(name)) {
+            order.emplace_back(name);
+        }
+        methods.insert_or_assign(name, pair{visibility, Method{def, sig}});
+    };
+    auto current = Visibility::Public;
+    for (size_t i = 0; i < body.size(); i++) {
+        auto stat = body[i];
+        auto sig = i > 0 && isSig(*file, body[i - 1]) ? reinterpret_cast<const pm_call_node_t *>(body[i - 1]) : nullptr;
+        if (PM_NODE_TYPE_P(stat, PM_DEF_NODE)) {
+            auto def = reinterpret_cast<const pm_def_node_t *>(stat);
+            if (def->receiver == nullptr) {
+                define(def, sig, current);
+            }
+            continue;
+        }
+        if (!PM_NODE_TYPE_P(stat, PM_CALL_NODE)) {
+            continue;
+        }
+        auto call = reinterpret_cast<const pm_call_node_t *>(stat);
+        auto visibility = call->receiver == nullptr ? visibilityOf(callName(*file, call)) : nullopt;
+        if (!visibility) {
+            continue;
+        }
+        auto args = arguments(call);
+        if (args.empty()) {
+            current = *visibility;
+            continue;
+        }
+        for (auto arg : args) {
+            if (PM_NODE_TYPE_P(arg, PM_DEF_NODE)) {
+                auto def = reinterpret_cast<const pm_def_node_t *>(arg);
+                if (def->receiver == nullptr) {
+                    define(def, sig, *visibility);
+                }
+            } else if (PM_NODE_TYPE_P(arg, PM_SYMBOL_NODE)) {
+                auto name = stringValue(reinterpret_cast<const pm_symbol_node_t *>(arg)->unescaped);
+                if (auto found = methods.find(name); found != methods.end()) {
+                    found->second.first = *visibility;
+                }
+            }
+        }
+    }
+    vector<pair<string, Method>> out;
+    for (auto &name : order) {
+        auto &[visibility, method] = methods.at(name);
+        if (visibility == Visibility::Public) {
+            out.emplace_back(name, method);
+        }
+    }
+    return out;
+}
+
 vector<Definition> definitions(const shared_ptr<RubyFile> &file) {
     vector<Definition> out;
     auto program = reinterpret_cast<const pm_program_node_t *>(file->root());

@@ -218,9 +218,14 @@ optional<vector<Param>> readParams(const RubyFile &file, const pm_parameters_nod
     if (params == nullptr) {
         return out;
     }
-    auto named = [&](pm_constant_id_t id, Param::Kind kind) -> bool {
+    // An anonymous `*`, `**` or `&` gets the name Sorbet gives it, which a sig uses for it too (`"*": String`).
+    auto named = [&](pm_constant_id_t id, Param::Kind kind, string_view anonymous = "") -> bool {
         if (id == 0) {
-            return false;
+            if (anonymous.empty()) {
+                return false;
+            }
+            out.emplace_back(Param{kind, string(anonymous)});
+            return true;
         }
         out.emplace_back(Param{kind, string(file.name(id))});
         return true;
@@ -240,7 +245,7 @@ optional<vector<Param>> readParams(const RubyFile &file, const pm_parameters_nod
     }
     if (params->rest != nullptr) {
         if (!PM_NODE_TYPE_P(params->rest, PM_REST_PARAMETER_NODE) ||
-            !named(reinterpret_cast<const pm_rest_parameter_node_t *>(params->rest)->name, Param::Kind::Rest)) {
+            !named(reinterpret_cast<const pm_rest_parameter_node_t *>(params->rest)->name, Param::Kind::Rest, "*")) {
             return nullopt;
         }
     }
@@ -263,11 +268,11 @@ optional<vector<Param>> readParams(const RubyFile &file, const pm_parameters_nod
     if (params->keyword_rest != nullptr) {
         if (!PM_NODE_TYPE_P(params->keyword_rest, PM_KEYWORD_REST_PARAMETER_NODE) ||
             !named(reinterpret_cast<const pm_keyword_rest_parameter_node_t *>(params->keyword_rest)->name,
-                   Param::Kind::KeywordRest)) {
+                   Param::Kind::KeywordRest, "**")) {
             return nullopt;
         }
     }
-    if (params->block != nullptr && !named(params->block->name, Param::Kind::Block)) {
+    if (params->block != nullptr && !named(params->block->name, Param::Kind::Block, "&")) {
         return nullopt;
     }
     return out;

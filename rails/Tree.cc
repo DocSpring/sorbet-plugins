@@ -74,7 +74,9 @@ optional<CopiedMethod> readMethod(core::MutableContext ctx, core::LocOffsets loc
     auto params = readParams(file, method.def->parameters);
     if (!params) {
         reportError(ctx, loc,
-                    fmt::format("can't copy the parameters of {} ({}:{}): give each one a name", label, file.path,
+                    fmt::format("can't copy the parameters of {} ({}:{}): it has `...`, a destructured parameter or "
+                                "`**nil`, which the plugin doesn't copy",
+                                label, file.path,
                                 file.line(reinterpret_cast<const pm_node_t *>(method.def))));
         return nullopt;
     }
@@ -93,7 +95,7 @@ optional<CopiedMethod> readMethod(core::MutableContext ctx, core::LocOffsets loc
 }
 
 void addCopiedMethod(core::MutableContext ctx, ast::ClassDef::RHS_store &body, core::LocOffsets loc, string_view name,
-                     const CopiedMethod &method, bool singleton) {
+                     const CopiedMethod &method, bool singleton, const optional<ConstantRef> &returnType) {
     ast::MethodDef::PARAMS_store params;
     for (auto &param : method.params) {
         params.emplace_back(paramTree(ctx, loc, param));
@@ -101,7 +103,9 @@ void addCopiedMethod(core::MutableContext ctx, ast::ClassDef::RHS_store &body, c
     const Sig *sig = method.sig ? &*method.sig : nullptr;
     auto args = *sigArgs(ctx, loc, *method.file, method.params, sig);
     optional<ast::ExpressionPtr> returns;
-    if (sig == nullptr) {
+    if (returnType) {
+        returns = constantTree(ctx, loc, *returnType);
+    } else if (sig == nullptr) {
         returns = ast::MK::Untyped(loc);
     } else if (sig->returns != nullptr) {
         returns = copyExpression(ctx, loc, *method.file, sig->returns);

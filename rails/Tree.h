@@ -40,9 +40,11 @@ struct CopiedMethod {
 std::optional<CopiedMethod> readMethod(core::MutableContext ctx, core::LocOffsets loc, const Definition &owner,
                                        const Definition::Method &method, std::string_view label);
 
-// Adds a method with the copied method's parameters and types: `T.untyped` for each without a sig.
+// Adds a method with the copied method's parameters and types: `T.untyped` for each without a sig. `returns`, when
+// given, is the return type in place of the method's own.
 void addCopiedMethod(core::MutableContext ctx, ast::ClassDef::RHS_store &body, core::LocOffsets loc,
-                     std::string_view name, const CopiedMethod &method, bool singleton);
+                     std::string_view name, const CopiedMethod &method, bool singleton,
+                     const std::optional<ConstantRef> &returns = std::nullopt);
 
 // Appends `module <name>; <body>; end` to the root, inside `def`'s own lexical nesting reopened (each enclosing
 // module or class written as in `def`'s file), so constants in the body resolve as they do in that file. Returns the

@@ -46,6 +46,9 @@ public:
         if (helpers) {
             rails::rewriteHelpers(ctx, classDef, *app, file);
         }
+        if (isUnder("app/mailers/")) {
+            rails::rewriteMailers(ctx, classDef, *app, file);
+        }
     }
 };
 
