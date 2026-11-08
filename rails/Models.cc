@@ -1,5 +1,6 @@
 // Models: the methods Tapioca's ActiveRecordRelations compiler wrote for every model (`where`, `find`, the relation
-// classes), from the relations template (templates/relations.rbi) with the model's name and primary key type.
+// classes), from the relations template (templates/relations.rbi) with the model's name and primary key type, and
+// the methods of the scopes, enums and store accessors in its code (ModelMacros.cc).
 //
 // A model is a class in an app file whose superclass chain reaches ActiveRecord::Base through the app's own classes
 // (ApplicationRecord, an STI parent), and isn't abstract. A class with a gem's superclass (`< Audited::Audit`) isn't
@@ -18,14 +19,6 @@ namespace sorbet::plugins::rails {
 namespace {
 
 constexpr int MAX_MODEL_DEPTH = 10;
-
-const pm_call_node_t *asCall(const pm_node_t *node) {
-    return PM_NODE_TYPE_P(node, PM_CALL_NODE) ? reinterpret_cast<const pm_call_node_t *>(node) : nullptr;
-}
-
-bool isSelf(const pm_node_t *node) {
-    return node != nullptr && PM_NODE_TYPE_P(node, PM_SELF_NODE);
-}
 
 // `self.abstract_class = true` or `primary_abstract_class` in the body.
 bool isAbstract(const Definition &def) {
@@ -222,6 +215,22 @@ void rewriteModels(core::MutableContext ctx, ast::ClassDef &root, const App &app
         auto source = replaceAll(string(templates::relations), "__MODEL__", join(def.fullName));
         source = replaceAll(move(source), "__IDS__", *ids);
         addTemplate(ctx, loc, tree->rhs, move(source), "relations");
+
+        vector<MacroProblem> problems;
+        auto macros = modelMacros(app, *model, *inflector, problems);
+        for (auto &problem : problems) {
+            if (problem.file->path == file->path) {
+                auto [begin, end] = file->offsets(problem.node);
+                reportError(ctx, core::LocOffsets{begin, end}, problem.message);
+            } else {
+                auto path = app.relative(problem.file->path).value_or(problem.file->path);
+                reportError(ctx, loc,
+                            fmt::format("{} line {}: {}", path, problem.file->line(problem.node), problem.message));
+            }
+        }
+        if (!macros.empty()) {
+            addTemplate(ctx, loc, tree->rhs, move(macros), "model macros");
+        }
     }
 }
 

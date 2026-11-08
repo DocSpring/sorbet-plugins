@@ -139,6 +139,9 @@ std::optional<Definition> findDefinition(const std::shared_ptr<RubyFile> &file, 
 std::optional<Definition> resolve(const App &app, const std::vector<ConstantName> &nesting, const ConstantRef &ref);
 
 // Prism helpers.
+// The node as a call, or nullptr if it's something else.
+const pm_call_node_t *asCall(const pm_node_t *node);
+bool isSelf(const pm_node_t *node);
 std::string_view callName(const RubyFile &file, const pm_call_node_t *call);
 std::vector<const pm_node_t *> arguments(const pm_call_node_t *call);
 // The statements of a body (a PM_STATEMENTS_NODE, or a begin block's statements).

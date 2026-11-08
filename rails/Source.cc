@@ -216,6 +216,15 @@ optional<ConstantRef> constantRef(const RubyFile &file, const pm_node_t *node) {
     return nullopt;
 }
 
+const pm_call_node_t *asCall(const pm_node_t *node) {
+    return node != nullptr && PM_NODE_TYPE_P(node, PM_CALL_NODE) ? reinterpret_cast<const pm_call_node_t *>(node)
+                                                                 : nullptr;
+}
+
+bool isSelf(const pm_node_t *node) {
+    return node != nullptr && PM_NODE_TYPE_P(node, PM_SELF_NODE);
+}
+
 string_view callName(const RubyFile &file, const pm_call_node_t *call) {
     return file.name(call->name);
 }

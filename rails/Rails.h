@@ -36,6 +36,24 @@ struct Model {
 std::optional<std::vector<Definition>> recordChain(const App &app, const Definition &def);
 std::optional<Model> readModel(const App &app, const Definition &def);
 
+// The app concerns a class or module includes, each one's own before it, once each: the order ActiveSupport::Concern
+// includes them in the class that includes `def`.
+std::vector<Definition> includedConcerns(const App &app, const Definition &def);
+
+class Inflector;
+
+// A macro in a model's code the plugin can't read, where it was written.
+struct MacroProblem {
+    std::shared_ptr<RubyFile> file;
+    const pm_node_t *node;
+    std::string message;
+};
+
+// RBI-shaped source (for addTemplate) for the methods of the `scope`, `enum` and `store_accessor` calls in a model's
+// code (ModelMacros.cc), and the macros it couldn't read.
+std::string modelMacros(const App &app, const Model &model, const Inflector &inflector,
+                        std::vector<MacroProblem> &problems);
+
 // Each part runs once per file, from the file's `<root>` body, after Sorbet has rewritten every class in it.
 void rewriteJobs(core::MutableContext ctx, ast::ClassDef &root, const App &app, const std::shared_ptr<RubyFile> &file);
 void rewriteHelpers(core::MutableContext ctx, ast::ClassDef &root, const App &app,

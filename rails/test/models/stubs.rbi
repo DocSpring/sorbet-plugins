@@ -5,6 +5,12 @@ module ActiveRecord
     def self.abstract_class=(value); end
     def self.table_name=(name); end
     def self.primary_key=(name); end
+    def self.scope(name, body, &block); end
+    def self.enum(name, values = nil, **options); end
+    def self.store_accessor(store_attribute, *keys, prefix: nil, suffix: nil); end
+    def self.attribute(name, cast_type = nil, **options); end
+    def self.validates(*attributes); end
+    def self.with_options(options, &block); end
   end
 
   class Relation
@@ -38,6 +44,10 @@ module ActiveRecord
 end
 
 module ActiveSupport
+  module Concern
+    def included(base = nil, &block); end
+  end
+
   module Inflector
     def self.inflections(locale = :en, &block); end
   end

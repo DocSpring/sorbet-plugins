@@ -135,22 +135,6 @@ bool hasClassMethods(const Definition &def) {
     return false;
 }
 
-// The app concerns `def` includes, each one's own before it, once each: the order ActiveSupport::Concern includes
-// them in the class that includes `def`.
-void concernDependencies(const App &app, const Definition &def, int depth, set<string> &seen, vector<Definition> &out) {
-    if (depth > MAX_CONCERN_DEPTH) {
-        return;
-    }
-    for (auto &ref : def.mixins("include")) {
-        auto found = resolve(app, def.nesting, ref);
-        if (!found || found->isClass || !found->isConcern() || !seen.insert(join(found->fullName)).second) {
-            continue;
-        }
-        concernDependencies(app, *found, depth + 1, seen, out);
-        out.emplace_back(*found);
-    }
-}
-
 ast::ExpressionPtr generatedModule(core::MutableContext ctx, core::LocOffsets loc, string_view name,
                                    ast::ClassDef::RHS_store body) {
     return ast::MK::Module(loc, loc, constantTree(ctx, loc, ConstantRef{{string(name)}, false}), move(body));
@@ -176,7 +160,28 @@ ast::ExpressionPtr mixesInClassMethods(core::MutableContext ctx, core::LocOffset
                           constantTree(ctx, loc, ConstantRef{module, true}));
 }
 
+void concernDependencies(const App &app, const Definition &def, int depth, set<string> &seen, vector<Definition> &out) {
+    if (depth > MAX_CONCERN_DEPTH) {
+        return;
+    }
+    for (auto &ref : def.mixins("include")) {
+        auto found = resolve(app, def.nesting, ref);
+        if (!found || found->isClass || !found->isConcern() || !seen.insert(join(found->fullName)).second) {
+            continue;
+        }
+        concernDependencies(app, *found, depth + 1, seen, out);
+        out.emplace_back(*found);
+    }
+}
+
 } // namespace
+
+vector<Definition> includedConcerns(const App &app, const Definition &def) {
+    set<string> seen{join(def.fullName)};
+    vector<Definition> out;
+    concernDependencies(app, def, 0, seen, out);
+    return out;
+}
 
 void rewriteConcerns(core::MutableContext ctx, ast::ClassDef &root, const App &app, const shared_ptr<RubyFile> &file) {
     for (auto &def : definitions(file)) {
@@ -229,10 +234,7 @@ void rewriteConcerns(core::MutableContext ctx, ast::ClassDef &root, const App &a
             tree->rhs.emplace_back(mixesInClassMethods(ctx, loc, classModule));
         }
 
-        set<string> seen{join(def.fullName)};
-        vector<Definition> dependencies;
-        concernDependencies(app, def, 0, seen, dependencies);
-        for (auto &dependency : dependencies) {
+        for (auto &dependency : includedConcerns(app, def)) {
             if (hasClassMethods(dependency)) {
                 auto module = dependency.fullName;
                 module.emplace_back("ClassMethods");
