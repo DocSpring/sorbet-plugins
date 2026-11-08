@@ -1,8 +1,8 @@
 #include "Source.h"
 
 #include <algorithm>
-#include <chrono>
 #include <cctype>
+#include <chrono>
 #include <filesystem>
 #include <fstream>
 #include <mutex>
@@ -505,10 +505,14 @@ vector<pair<string, Definition::Method>> Definition::publicMethods() const {
     return out;
 }
 
+vector<const pm_node_t *> RubyFile::topLevel() const {
+    auto program = reinterpret_cast<const pm_program_node_t *>(root_);
+    return statements(reinterpret_cast<const pm_node_t *>(program->statements));
+}
+
 vector<Definition> definitions(const shared_ptr<RubyFile> &file) {
     vector<Definition> out;
-    auto program = reinterpret_cast<const pm_program_node_t *>(file->root());
-    collect(file, statements(reinterpret_cast<const pm_node_t *>(program->statements)), nullptr, out);
+    collect(file, file->topLevel(), nullptr, out);
     return out;
 }
 

@@ -68,6 +68,12 @@ public:
     int line(const pm_node_t *node) const;
     // A node's byte offsets in the source (begin, end): a location in Sorbet's tree when this is the file it checks.
     std::pair<uint32_t, uint32_t> offsets(const pm_node_t *node) const;
+    // How many syntax errors Prism found.
+    size_t errorCount() const {
+        return parser.error_list.size;
+    }
+    // The top-level statements.
+    std::vector<const pm_node_t *> topLevel() const;
 
 private:
     std::string source;

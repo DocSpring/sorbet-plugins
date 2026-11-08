@@ -1,9 +1,10 @@
 // The rails plugin: types for what a Rails app's own code declares, written while Sorbet reads the file, in place of
 // the Tapioca DSL RBIs that copied the same facts and went stale whenever the code changed.
 //
-// It reads other files of the app by Zeitwerk path (a job's parent, an included module), from disk, every time. The
-// language server sees a change to one of those files only when the file that depends on it is checked again (edit
-// it, or restart the server). Don't use `--cache-dir` with this plugin: Sorbet's cache is keyed on a file's own
+// It reads other files of the app by Zeitwerk path (a job's parent, an included module), and for models
+// `db/structure.sql` and `config/initializers/inflections.rb`, from disk, every time. The language server sees a
+// change to one of those files only when the file that depends on it is checked again (edit it, or restart the
+// server). Don't use `--cache-dir` with this plugin: Sorbet's cache is keyed on a file's own
 // source, so it would keep a dependent file's old types.
 
 #include "Rails.h"
@@ -40,7 +41,10 @@ public:
         // A concern's file names ActiveSupport::Concern: the text check saves parsing every other file.
         auto concerns =
             (isUnder("app/") || isUnder("lib/")) && source.find("ActiveSupport::Concern") != string_view::npos;
-        if (!jobs && !helpers && !concerns) {
+        // A model's file has a class with a superclass. Controllers, jobs, mailers, views and the rest never hold one.
+        auto models = isUnder("app/") && !jobs && !helpers && !isUnder("app/views/") && !isUnder("app/helpers/") &&
+                      !isUnder("app/admin/") && !isUnder("app/components/") && source.find(" < ") != string_view::npos;
+        if (!jobs && !helpers && !concerns && !models) {
             return;
         }
         auto file = make_shared<rails::RubyFile>(string(path), string(source));
@@ -55,6 +59,9 @@ public:
         }
         if (isUnder("app/mailers/")) {
             rails::rewriteMailers(ctx, classDef, *app, file);
+        }
+        if (models) {
+            rails::rewriteModels(ctx, classDef, *app, file);
         }
     }
 };
