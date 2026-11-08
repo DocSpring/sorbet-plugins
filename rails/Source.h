@@ -105,6 +105,10 @@ struct Definition {
 
     // `include X` (or `extend X`) statements in the body, with literal constants, in order.
     std::vector<ConstantRef> mixins(std::string_view method) const;
+    // A module whose body extends ActiveSupport::Concern.
+    bool isConcern() const;
+    // The blocks of the body's `included do ... end` calls, in order.
+    std::vector<const pm_block_node_t *> includedBlocks() const;
     // `def name` (or `def self.name`) in the body, and the `sig` statement right before it, if any.
     struct Method {
         const pm_def_node_t *def;

@@ -30,6 +30,8 @@ void rewriteHelpers(core::MutableContext ctx, ast::ClassDef &root, const App &ap
                     const std::shared_ptr<RubyFile> &file);
 void rewriteMailers(core::MutableContext ctx, ast::ClassDef &root, const App &app,
                     const std::shared_ptr<RubyFile> &file);
+void rewriteConcerns(core::MutableContext ctx, ast::ClassDef &root, const App &app,
+                     const std::shared_ptr<RubyFile> &file);
 
 } // namespace sorbet::plugins::rails
 

@@ -219,19 +219,10 @@ struct Walker {
         }
     }
 
-    static bool isConcern(const Definition &def) {
-        for (auto &ref : def.mixins("extend")) {
-            if (join(ref.name) == "ActiveSupport::Concern") {
-                return true;
-            }
-        }
-        return false;
-    }
-
     // What including an app concern does to the helpers: its own concerns first (ActiveSupport::Concern includes a
     // concern's dependencies in the class that includes it), then its `included` block.
     void includeConcern(Gathered &gathered, const Definition &concern, int depth) const {
-        if (depth > MAX_DEPTH || !isConcern(concern) || !gathered.concerns.insert(join(concern.fullName)).second) {
+        if (depth > MAX_DEPTH || !concern.isConcern() || !gathered.concerns.insert(join(concern.fullName)).second) {
             return;
         }
         for (auto stat : concern.body) {

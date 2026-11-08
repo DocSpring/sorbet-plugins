@@ -275,6 +275,33 @@ vector<ConstantRef> Definition::mixins(string_view methodName) const {
     return out;
 }
 
+bool Definition::isConcern() const {
+    if (isClass) {
+        return false;
+    }
+    for (auto &ref : mixins("extend")) {
+        if (join(ref.name) == "ActiveSupport::Concern") {
+            return true;
+        }
+    }
+    return false;
+}
+
+vector<const pm_block_node_t *> Definition::includedBlocks() const {
+    vector<const pm_block_node_t *> out;
+    for (auto stat : body) {
+        if (!PM_NODE_TYPE_P(stat, PM_CALL_NODE)) {
+            continue;
+        }
+        auto call = reinterpret_cast<const pm_call_node_t *>(stat);
+        if (call->receiver == nullptr && callName(*file, call) == "included" && call->block != nullptr &&
+            PM_NODE_TYPE_P(call->block, PM_BLOCK_NODE)) {
+            out.emplace_back(reinterpret_cast<const pm_block_node_t *>(call->block));
+        }
+    }
+    return out;
+}
+
 namespace {
 
 bool isSig(const RubyFile &file, const pm_node_t *stat) {

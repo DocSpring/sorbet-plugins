@@ -34,12 +34,19 @@ public:
             return;
         }
         auto isUnder = [&](string_view dir) { return relative->substr(0, dir.size()) == dir; };
+        auto source = ctx.file.data(ctx).source();
         auto jobs = isUnder("app/jobs/");
         auto helpers = isUnder("app/controllers/") || isUnder("app/mailers/");
-        if (!jobs && !helpers) {
+        // A concern's file names ActiveSupport::Concern: the text check saves parsing every other file.
+        auto concerns =
+            (isUnder("app/") || isUnder("lib/")) && source.find("ActiveSupport::Concern") != string_view::npos;
+        if (!jobs && !helpers && !concerns) {
             return;
         }
-        auto file = make_shared<rails::RubyFile>(string(path), string(ctx.file.data(ctx).source()));
+        auto file = make_shared<rails::RubyFile>(string(path), string(source));
+        if (concerns) {
+            rails::rewriteConcerns(ctx, classDef, *app, file);
+        }
         if (jobs) {
             rails::rewriteJobs(ctx, classDef, *app, file);
         }
