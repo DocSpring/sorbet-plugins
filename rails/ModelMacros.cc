@@ -455,6 +455,37 @@ struct IgnoredColumns {
     vector<string> names;
 };
 
+// `include Uploader.attachment(:name)`: a Shrine attachment, at its place in the model's chain.
+struct ShrineAttachmentInclude {
+    string name;
+    UploaderPlugins plugins;
+    size_t level = 0;
+};
+
+// The `Uploader.attachment(:name)` call of `include Uploader.attachment(:name)`, or of `T.unsafe(self).include ...`
+// (Sorbet rejects an `include` of a call), or nullptr for any other statement.
+const pm_call_node_t *attachmentInclude(const RubyFile &file, const pm_call_node_t *call) {
+    if (call == nullptr || callName(file, call) != "include") {
+        return nullptr;
+    }
+    if (call->receiver != nullptr) {
+        auto unsafe = asCall(call->receiver);
+        auto t = unsafe == nullptr || unsafe->receiver == nullptr ? nullopt : constantRef(file, unsafe->receiver);
+        auto unsafeArgs = unsafe == nullptr ? vector<const pm_node_t *>{} : arguments(unsafe);
+        if (!t || join(t->name) != "T" || callName(file, unsafe) != "unsafe" || unsafeArgs.size() != 1 ||
+            !isSelf(unsafeArgs[0])) {
+            return nullptr;
+        }
+    }
+    auto args = arguments(call);
+    auto attachment = args.size() == 1 ? asCall(args[0]) : nullptr;
+    if (attachment == nullptr || attachment->receiver == nullptr ||
+        (callName(file, attachment) != "attachment" && callName(file, attachment) != "Attachment")) {
+        return nullptr;
+    }
+    return attachment;
+}
+
 // What one class body declares, with what its concerns' `included` blocks declare in it.
 struct ClassMacros {
     vector<string> scopes;
@@ -466,6 +497,7 @@ struct ClassMacros {
     vector<Association> associations;
     vector<string> associationSources; // the same
     vector<string> nestedAttributes;
+    vector<ShrineAttachmentInclude> attachments;
 };
 
 // Statements that run in a class body: its own, or an `included` block's, with the definition they're written in
@@ -531,6 +563,10 @@ private:
             ignoredColumns(home, stat, args.size() == 1 ? args[0] : nullptr, true, "=", out);
             return;
         }
+        if (auto attachment = attachmentInclude(*home.file, call)) {
+            attachmentCall(home, stat, attachment, out);
+            return;
+        }
         auto name = call != nullptr && call->receiver == nullptr ? callName(*home.file, call) : "";
         auto macro = name.empty() ? macros.end() : macros.find(name);
         if (name == "scope") {
@@ -590,6 +626,36 @@ private:
         } else {
             nested(home, stat);
         }
+    }
+
+    void attachmentCall(const Definition &home, const pm_node_t *stat, const pm_call_node_t *attachment,
+                        ClassMacros &out) {
+        auto args = splitArguments(attachment);
+        auto name = args.positional.size() == 1 && args.keywords.empty() && args.splats.empty() && args.readable &&
+                            attachment->block == nullptr
+                        ? nameLiteral(args.positional[0])
+                        : nullopt;
+        if (!name) {
+            problem(home, stat,
+                    "can't read this attachment: the plugin reads `Uploader.attachment(:name)` with a name that's a "
+                    "symbol or string, and no options");
+            return;
+        }
+        auto ref = constantRef(*home.file, attachment->receiver);
+        auto uploader = ref ? resolve(app, home.nesting, *ref) : nullopt;
+        if (!uploader) {
+            problem(
+                home, stat,
+                fmt::format("can't type the attachment `{}`: its uploader isn't a class in the app's files", *name));
+            return;
+        }
+        string error;
+        auto plugins = uploaderPlugins(app, *uploader, error);
+        if (!plugins) {
+            problem(home, stat, fmt::format("can't type the attachment `{}`: {}", *name, error));
+            return;
+        }
+        out.attachments.emplace_back(ShrineAttachmentInclude{*name, move(*plugins), level});
     }
 
     void associationCall(const Definition &home, const pm_call_node_t *call, Association::Macro macro,
@@ -1191,6 +1257,28 @@ string modelMacros(const App &app, const Model &model, const Inflector &inflecto
                                key);
         }
         out += "end\n\n";
+    }
+
+    // Shrine attachments, a superclass's first. A method that the model, or a class between it and the one that
+    // includes the attachment, defines itself is its own (ShrineAttachments wrote only those the attachment's module
+    // defines for the model).
+    string attachments;
+    for (auto declared = classes.rbegin(); declared != classes.rend(); declared++) {
+        for (auto &attachment : declared->attachments) {
+            attachments += attachmentMethods(attachment.plugins, attachment.name, [&](string_view method) {
+                for (size_t level = 0; level <= attachment.level && level < model.chain.size(); level++) {
+                    if (model.chain[level].method(method)) {
+                        return true;
+                    }
+                }
+                return false;
+            });
+        }
+    }
+    if (!attachments.empty()) {
+        out += fmt::format(
+            "include GeneratedShrineAttachmentMethods\n\nmodule GeneratedShrineAttachmentMethods\n{}end\n\n",
+            attachments);
     }
 
     out += associationMethods(app, inflector, associationsOf(model, classes, problems), problems);

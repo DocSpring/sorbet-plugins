@@ -134,6 +134,30 @@ std::string associationMethods(const App &app, const Inflector &inflector, const
 std::string modelMacros(const App &app, const Model &model, const Inflector &inflector, const Table &table,
                         const std::optional<std::string> &primaryKey, std::vector<MacroProblem> &problems);
 
+// Shrine (Uploaders.cc). The attachment methods a plugin defines (`activerecord` brings `model`'s and `entity`'s).
+namespace ShrineAttachment {
+enum : uint8_t {
+    Entity = 1 << 0,      // `name`, `name_attacher`, `name_url`
+    Model = 1 << 1,       // `name=`, `name_changed?`
+    CachedData = 1 << 2,  // `cached_name_data`
+    Derivatives = 1 << 3, // `name_derivatives`, `name_derivatives!`, and `name` takes a derivative's name
+};
+}
+
+// What an uploader's plugins (its own, its superclasses' and Shrine's global ones) give its attachments.
+struct UploaderPlugins {
+    ConstantName uploader;
+    uint8_t attachment = 0;
+    bool versions = false; // a plugin's `configure` sets `opts[:versions]`: the reader can return a hash of versions
+};
+
+// The plugins of an uploader (an app class whose superclasses up to Shrine are the app's), or nullopt with `error`.
+std::optional<UploaderPlugins> uploaderPlugins(const App &app, const Definition &def, std::string &error);
+
+// RBI-shaped source for the methods `include Uploader.attachment(:name)` defines, without those `skip` names.
+std::string attachmentMethods(const UploaderPlugins &plugins, std::string_view name,
+                              const std::function<bool(std::string_view)> &skip);
+
 // Each part runs once per file, from the file's `<root>` body, after Sorbet has rewritten every class in it.
 void rewriteJobs(core::MutableContext ctx, ast::ClassDef &root, const App &app, const std::shared_ptr<RubyFile> &file);
 void rewriteHelpers(core::MutableContext ctx, ast::ClassDef &root, const App &app,
@@ -146,6 +170,8 @@ void rewriteModels(core::MutableContext ctx, ast::ClassDef &root, const App &app
                    const std::shared_ptr<RubyFile> &file);
 void rewriteComponents(core::MutableContext ctx, ast::ClassDef &root, const App &app,
                        const std::shared_ptr<RubyFile> &file);
+void rewriteUploaders(core::MutableContext ctx, ast::ClassDef &root, const App &app,
+                      const std::shared_ptr<RubyFile> &file);
 
 } // namespace sorbet::plugins::rails
 

@@ -46,7 +46,7 @@ public:
                       !isUnder("app/admin/") && !isUnder("app/components/") && source.find(" < ") != string_view::npos;
         // A component's slots: ViewComponent's `renders_one` and `renders_many`.
         auto components = isUnder("app/") && (source.find("renders_one") != string_view::npos ||
-                                               source.find("renders_many") != string_view::npos);
+                                              source.find("renders_many") != string_view::npos);
         if (!jobs && !helpers && !concerns && !models && !components) {
             return;
         }
@@ -65,6 +65,8 @@ public:
         }
         if (models) {
             rails::rewriteModels(ctx, classDef, *app, file);
+            // Shrine uploaders are classes with a superclass too.
+            rails::rewriteUploaders(ctx, classDef, *app, file);
         }
         if (components) {
             rails::rewriteComponents(ctx, classDef, *app, file);
