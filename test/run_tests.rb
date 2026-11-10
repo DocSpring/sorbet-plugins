@@ -26,6 +26,23 @@ CHECKED_TOGETHER = %w[erb_views].freeze
 # `test/<case>/` directory is an app of its own, checked in one run with its own `.rbi` stubs as well as `test/*.rbi`.
 CHECKED_BY_CASE = %w[rails].freeze
 
+# Long enough for the slowest case on a busy machine; a plugin that loops forever fails its case instead of the run.
+TIMEOUT = 120
+
+# [output, status], or [output, nil] when Sorbet didn't finish in TIMEOUT seconds (it's killed).
+def run_sorbet(command)
+  Open3.popen2e({ 'SORBET_SILENCE_DEV_MESSAGE' => '1' }, *command) do |stdin, out, wait|
+    stdin.close
+    reader = Thread.new { out.read }
+    unless wait.join(TIMEOUT)
+      Process.kill('KILL', wait.pid)
+      wait.join
+      return [reader.value, nil]
+    end
+    [reader.value, wait.value]
+  end
+end
+
 ERROR_LINE = /\A(?<file>[^:\s]+):(?<line>\d+): (?<message>.*?)(?: https:\/\/srb\.help\/\d+)?\z/
 
 failures = 0
@@ -49,9 +66,15 @@ plugins.each do |plugin|
     sources = group.to_h { |fixture| [fixture, File.read(fixture)] }
     extra = sources.values.flat_map { |source| source[/^# sorbet-args: (.*)$/, 1].to_s.shellsplit }.uniq
     command = [sorbet, '--no-config', "--enable-plugin=#{plugin}", *extra, *group, *group_stubs]
-    output, status = Open3.capture2e({ 'SORBET_SILENCE_DEV_MESSAGE' => '1' }, *command)
-    # Sorbet exits 100 when it reports errors.
-    raise "Sorbet crashed on #{group.join(' ')} (exit #{status.exitstatus}):\n#{output}" unless [0, 100].include?(status.exitstatus)
+    output, status = run_sorbet(command)
+    # Sorbet exits 100 when it reports errors. A crash or a hang fails every fixture of the run, and the rest go on.
+    unless status && [0, 100].include?(status.exitstatus)
+      failures += group.size
+      fixtures += group.size
+      how = status.nil? ? "didn't finish in #{TIMEOUT} seconds" : "crashed (#{status})"
+      puts "FAIL Sorbet #{how} on #{group.first.delete_prefix("#{root}/")} and #{group.size - 1} more:", output.lines.last(20)
+      next
+    end
 
     # file => line => messages
     reported = Hash.new { |hash, file| hash[file] = Hash.new { |lines, line| lines[line] = [] } }

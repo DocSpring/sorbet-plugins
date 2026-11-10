@@ -227,7 +227,8 @@ void rewriteModels(core::MutableContext ctx, ast::ClassDef &root, const App &app
         addTemplate(ctx, loc, tree->rhs, move(source), "relations");
 
         vector<MacroProblem> problems;
-        auto macros = modelMacros(app, *model, *inflector, found->second, primaryKey, problems);
+        vector<AttachmentInclude> attachmentIncludes;
+        auto macros = modelMacros(app, *model, *inflector, found->second, primaryKey, problems, attachmentIncludes);
         for (auto &problem : problems) {
             if (problem.file->path == file->path) {
                 auto [begin, end] = file->offsets(problem.node);
@@ -240,6 +241,24 @@ void rewriteModels(core::MutableContext ctx, ast::ClassDef &root, const App &app
         }
         if (!macros.empty()) {
             addTemplate(ctx, loc, tree->rhs, move(macros), "model macros");
+        }
+        size_t firsts = 0;
+        for (auto &placement : attachmentIncludes) {
+            auto module = def.fullName;
+            module.emplace_back(placement.module);
+            auto index = tree->rhs.size();
+            if (placement.first) {
+                index = firsts++;
+            } else if (placement.after != nullptr) {
+                auto [begin, end] = file->offsets(placement.after);
+                for (size_t i = 0; i < tree->rhs.size(); i++) {
+                    if (tree->rhs[i].loc().beginPos() == begin) {
+                        index = i + 1;
+                        break;
+                    }
+                }
+            }
+            tree->rhs.insert(tree->rhs.begin() + index, mixinStatement(ctx, loc, "include", module));
         }
     }
 }

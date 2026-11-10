@@ -1,4 +1,5 @@
 #include "Source.h"
+#include "Inflector.h"
 
 #include <algorithm>
 #include <cctype>
@@ -173,6 +174,11 @@ RubyFile::~RubyFile() {
 }
 
 string_view RubyFile::name(pm_constant_id_t id) const {
+    // Prism leaves a name it couldn't parse unset (`Foo::` with nothing after it, which the language server sees while
+    // someone types), and the constant pool has no entry for it.
+    if (id == PM_CONSTANT_ID_UNSET) {
+        return {};
+    }
     auto constant = pm_constant_pool_id_to_constant(&parser.constant_pool, id);
     return string_view(reinterpret_cast<const char *>(constant->start), constant->length);
 }
@@ -210,6 +216,10 @@ optional<ConstantRef> constantRef(const RubyFile &file, const pm_node_t *node) {
                 return nullopt;
             }
             ref = *parent;
+        }
+        // `Foo::` with nothing after it: not a constant (yet).
+        if (path->name == PM_CONSTANT_ID_UNSET) {
+            return nullopt;
         }
         ref.name.emplace_back(file.name(path->name));
         return ref;
@@ -335,6 +345,14 @@ optional<Definition::Method> findMethodIn(const RubyFile &file, const vector<con
             }
             continue;
         }
+        // A `def` passed to a method, as `private def foo` and `helper_method def foo` are, defines it too.
+        auto wrapper = asCall(stat);
+        if (wrapper != nullptr && wrapper->receiver == nullptr) {
+            auto args = arguments(wrapper);
+            if (args.size() == 1 && PM_NODE_TYPE_P(args[0], PM_DEF_NODE)) {
+                stat = args[0];
+            }
+        }
         if (!PM_NODE_TYPE_P(stat, PM_DEF_NODE)) {
             continue;
         }
@@ -415,7 +433,7 @@ optional<string> constantFile(const App &app, const ConstantName &name) {
         for (size_t i = 0; i < name.size() && found; i++) {
             auto last = i + 1 == name.size();
             auto want = normalizedName(name[i]);
-            found = false;
+            vector<pair<string, string>> matches; // (entry, stem)
             for (auto &entry : app.list(path)) {
                 auto stem = last ? (entry.size() > 3 && entry.substr(entry.size() - 3) == ".rb"
                                         ? entry.substr(0, entry.size() - 3)
@@ -423,10 +441,20 @@ optional<string> constantFile(const App &app, const ConstantName &name) {
                                  : entry;
                 if (!stem.empty() && entry.find('.') == (last ? entry.size() - 3 : string::npos) &&
                     normalizedName(stem) == want) {
-                    path += last ? entry : entry + "/";
-                    found = true;
-                    break;
+                    matches.emplace_back(entry, stem);
                 }
+            }
+            if (matches.size() > 1) {
+                // Names that differ only in underscores (`a_bc.rb`, `ab_c.rb`): Zeitwerk loads the constant from the
+                // one the app's inflector camelizes to it (`ABc`, `AbC`).
+                string error;
+                auto inflector = Inflector::forApp(app, error);
+                erase_if(matches,
+                         [&](auto &match) { return !error.empty() || inflector.camelize(match.second) != name[i]; });
+            }
+            found = matches.size() == 1;
+            if (found) {
+                path += last ? matches[0].first : matches[0].first + "/";
             }
         }
         if (found) {
@@ -613,12 +641,13 @@ Arguments hashArguments(const pm_hash_node_t *hash) {
 }
 
 vector<const pm_call_node_t *> macroCalls(const RubyFile &file, const pm_node_t *node,
-                                          const function<bool(string_view)> &isMacro) {
+                                          const function<bool(string_view)> &isMacro, bool localReceivers) {
     struct Search {
         const RubyFile *file;
         const function<bool(string_view)> *isMacro;
+        bool localReceivers;
         vector<const pm_call_node_t *> found;
-    } search{&file, &isMacro, {}};
+    } search{&file, &isMacro, localReceivers, {}};
     if (node == nullptr) {
         return {};
     }
@@ -637,8 +666,10 @@ vector<const pm_call_node_t *> macroCalls(const RubyFile &file, const pm_node_t 
                     break;
             }
             auto call = asCall(node);
-            if (call != nullptr && (call->receiver == nullptr || isSelf(call->receiver)) &&
-                (*search->isMacro)(callName(*search->file, call))) {
+            auto receiverOk = call != nullptr &&
+                              (call->receiver == nullptr || isSelf(call->receiver) ||
+                               (search->localReceivers && PM_NODE_TYPE_P(call->receiver, PM_LOCAL_VARIABLE_READ_NODE)));
+            if (receiverOk && (*search->isMacro)(callName(*search->file, call))) {
                 search->found.emplace_back(call);
             }
             return true;

@@ -209,6 +209,10 @@ struct Walker {
                 name = stringValue(reinterpret_cast<const pm_symbol_node_t *>(arg)->unescaped);
             } else if (PM_NODE_TYPE_P(arg, PM_STRING_NODE)) {
                 name = stringValue(reinterpret_cast<const pm_string_node_t *>(arg)->unescaped);
+            } else if (PM_NODE_TYPE_P(arg, PM_DEF_NODE) &&
+                       reinterpret_cast<const pm_def_node_t *>(arg)->receiver == nullptr) {
+                // `helper_method def foo`: `def` returns the method's name.
+                name = string(scope.file->name(reinterpret_cast<const pm_def_node_t *>(arg)->name));
             } else {
                 error(*scope.file, arg, "`helper_method` takes method names: the plugin can't read this one");
                 continue;
@@ -275,6 +279,11 @@ struct Walker {
                 helperCall(gathered, scope, call);
             } else if (name == "helper_method") {
                 helperMethodCall(gathered, scope, call);
+            } else if (name == "clear_helpers") {
+                // Rails then gives the class a fresh module with only the default helper; the plugin would keep the
+                // parent's helpers and those added before the call.
+                error(*scope.file, stat,
+                      "`clear_helpers` isn't supported: the plugin would keep the helpers it removes");
             }
         }
     }
@@ -384,8 +393,8 @@ void rewriteHelpers(core::MutableContext ctx, ast::ClassDef &root, const App &ap
         // What the class's app ancestors gave its helpers, from the farthest down.
         Gathered gathered;
         for (auto it = line.parents.rbegin(); it != line.parents.rend(); ++it) {
-            walker.classStart(gathered, *it, line.directBase && it == line.parents.rbegin() &&
-                                                 line.kind == Kind::Controller);
+            walker.classStart(gathered, *it,
+                              line.directBase && it == line.parents.rbegin() && line.kind == Kind::Controller);
             walker.walk(gathered, *it, it->body, 0);
         }
         auto allHelpers = line.directBase && line.parents.empty() && line.kind == Kind::Controller;
@@ -403,11 +412,24 @@ void rewriteHelpers(core::MutableContext ctx, ast::ClassDef &root, const App &ap
         }
         walker.walk(gathered, def, def.body, 0);
 
+        // Rails gives a class a helper module that includes its parent's first, then the class's own helpers. The
+        // parent's is ours, or a gem class's (ActionController::Base's, with the helper modules gems add to it;
+        // Devise's), whose name the plugin can't know: Sorbet doesn't find `Devise::SessionsController::HelperMethods`
+        // through its superclass as Ruby does. So the class gets an empty module, included first, that Tapioca's
+        // RBI fills with the helper modules the class inherits from the gem class. Were they in the RBI's
+        // `HelperMethods` instead, Sorbet would put them after the app's (it orders a module's mixins from several
+        // files by path, and sorbet/ comes after app/).
         ast::ClassDef::RHS_store body;
         if (isMain && !line.parents.empty()) {
             auto parentModule = line.parents.front().fullName;
             parentModule.emplace_back("HelperMethods");
             body.emplace_back(mixinStatement(ctx, loc, "include", parentModule));
+        } else if (isMain) {
+            tree->rhs.emplace_back(ast::MK::Module(
+                loc, loc, constantTree(ctx, loc, ConstantRef{{"SorbetInheritedHelperMethods"}, false}), {}));
+            auto inherited = def.fullName;
+            inherited.emplace_back("SorbetInheritedHelperMethods");
+            body.emplace_back(mixinStatement(ctx, loc, "include", inherited));
         }
         for (auto &name : includes) {
             body.emplace_back(mixinStatement(ctx, loc, "include", name));
@@ -453,16 +475,15 @@ void rewriteHelpers(core::MutableContext ctx, ast::ClassDef &root, const App &ap
         }
 
         if (isMain || !body.empty()) {
-            tree->rhs.emplace_back(ast::MK::Module(
-                loc, loc, constantTree(ctx, loc, ConstantRef{{"HelperMethods"}, false}), move(body)));
+            tree->rhs.emplace_back(
+                ast::MK::Module(loc, loc, constantTree(ctx, loc, ConstantRef{{"HelperMethods"}, false}), move(body)));
         }
         if (isMain && line.kind == Kind::Controller) {
             // First in the body, so a `private` in the class doesn't apply to it.
             ast::ClassDef::RHS_store helpers;
-            addMethod(ctx, helpers, loc, "helpers", {}, {},
-                      constantTree(ctx, loc, ConstantRef{{"HelperProxy"}, false}), false);
-            tree->rhs.insert(tree->rhs.begin(), make_move_iterator(helpers.begin()),
-                             make_move_iterator(helpers.end()));
+            addMethod(ctx, helpers, loc, "helpers", {}, {}, constantTree(ctx, loc, ConstantRef{{"HelperProxy"}, false}),
+                      false);
+            tree->rhs.insert(tree->rhs.begin(), make_move_iterator(helpers.begin()), make_move_iterator(helpers.end()));
             auto helperMethods = def.fullName;
             helperMethods.emplace_back("HelperMethods");
             ast::ClassDef::RHS_store proxyBody;

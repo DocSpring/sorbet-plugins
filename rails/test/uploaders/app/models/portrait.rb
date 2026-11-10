@@ -7,6 +7,6 @@ class Portrait < Photo
 end
 
 T.reveal_type(Portrait.new.image) # error: Revealed type: `T.nilable(ImageUploader::UploadedFile)`
-T.reveal_type(T.let(Portrait.new, Portrait::GeneratedShrineAttachmentMethods).image_changed?) # error: Revealed type: `T::Boolean`
-T.let(Portrait.new, Portrait::GeneratedShrineAttachmentMethods).image_attacher # error: Method `image_attacher` does not exist on `Portrait::GeneratedShrineAttachmentMethods`
-T.let(Portrait.new, Portrait::GeneratedShrineAttachmentMethods).image_url # error: Method `image_url` does not exist on `Portrait::GeneratedShrineAttachmentMethods`
+T.reveal_type(T.let(Portrait.new, Portrait::GeneratedShrineAttachmentMethods_image).image_changed?) # error: Revealed type: `T::Boolean`
+T.let(Portrait.new, Portrait::GeneratedShrineAttachmentMethods_image).image_attacher # error: Method `image_attacher` does not exist on `Portrait::GeneratedShrineAttachmentMethods_image`
+T.let(Portrait.new, Portrait::GeneratedShrineAttachmentMethods_image).image_url # error: Method `image_url` does not exist on `Portrait::GeneratedShrineAttachmentMethods_image`

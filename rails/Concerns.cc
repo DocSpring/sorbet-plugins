@@ -41,7 +41,8 @@ vector<const pm_call_node_t *> classAttributeCalls(const Definition &def) {
                 continue;
             }
             auto call = reinterpret_cast<const pm_call_node_t *>(stat);
-            if (call->receiver == nullptr && callName(*def.file, call) == "class_attribute") {
+            if ((call->receiver == nullptr || isSelf(call->receiver)) &&
+                callName(*def.file, call) == "class_attribute") {
                 out.emplace_back(call);
             }
         }

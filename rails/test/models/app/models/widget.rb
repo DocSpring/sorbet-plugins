@@ -16,6 +16,8 @@ class Widget < ApplicationRecord
   enum :tone, Palette::TONES, prefix: true
   suffixed_enum :finish, { matte: 0, gloss: 1 }
   enum :rank, { low: 0, high: 'high' }
+  enum :flavor, { sweet: :sweet, sour: :sour }
+  enum :texture, smooth: 0, rough: 1
 
   belongs_to :category, optional: true
   has_many :comments, as: :subject
@@ -60,6 +62,11 @@ T.reveal_type(Widget.new.tone_cool?) # error: Revealed type: `T::Boolean`
 T.reveal_type(Widget.finishes) # error: Revealed type: `T::Hash[T.any(String, Symbol), Integer]`
 T.reveal_type(Widget.new.matte_finish?) # error: Revealed type: `T::Boolean`
 T.reveal_type(Widget.ranks) # error: Revealed type: `T::Hash[T.any(String, Symbol), T.any(Integer, String)]`
+# Rails stores a Symbol value as a String.
+T.reveal_type(Widget.flavors) # error: Revealed type: `T::Hash[T.any(String, Symbol), String]`
+# Values written as keywords.
+T.reveal_type(Widget.textures) # error: Revealed type: `T::Hash[T.any(String, Symbol), Integer]`
+T.reveal_type(Widget.new.rough?) # error: Revealed type: `T::Boolean`
 
 # From the concern.
 T.reveal_type(Widget.kinds) # error: Revealed type: `T::Hash[T.any(String, Symbol), Integer]`

@@ -24,4 +24,4 @@ T.reveal_type(photo.image_derivatives) # error: Revealed type: `T.untyped`
 T.reveal_type(photo.thumbnail_url(:small, public: true)) # error: Revealed type: `T.nilable(String)`
 T.reveal_type(photo.thumbnail_attacher) # error: Revealed type: `ThumbnailUploader::Attacher`
 T.reveal_type(photo.thumbnail) # error: Revealed type: `T.nilable(ThumbnailUploader::UploadedFile)`
-T.let(photo, Photo::GeneratedShrineAttachmentMethods).image_url # error: Method `image_url` does not exist on `Photo::GeneratedShrineAttachmentMethods`
+T.let(photo, Photo::GeneratedShrineAttachmentMethods_image).image_url # error: Method `image_url` does not exist on `Photo::GeneratedShrineAttachmentMethods_image`

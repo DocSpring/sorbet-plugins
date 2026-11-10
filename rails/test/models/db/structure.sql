@@ -13,6 +13,8 @@ CREATE TABLE public.widgets (
     tone integer,
     finish integer,
     rank integer,
+    flavor character varying,
+    texture integer,
     settings jsonb,
     a integer,
     b integer,

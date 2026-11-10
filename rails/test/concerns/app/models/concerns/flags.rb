@@ -8,5 +8,6 @@ module Flags
     class_attribute :alpha, :beta
     class_attribute :hidden, instance_reader: false
     class_attribute :plain, instance_predicate: false
+    self.class_attribute :explicit
   end
 end

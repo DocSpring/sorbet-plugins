@@ -71,13 +71,17 @@ bool copyable(core::MutableContext ctx, core::LocOffsets loc, const RubyFile &fi
 optional<CopiedMethod> readMethod(core::MutableContext ctx, core::LocOffsets loc, const Definition &owner,
                                   const Definition::Method &method, string_view label) {
     auto &file = *owner.file;
+    // Sorbet reports the syntax error in that file; a second error here about the half-written method would only
+    // point away from it.
+    if (file.hasSyntaxError()) {
+        return nullopt;
+    }
     auto params = readParams(file, method.def->parameters);
     if (!params) {
         reportError(ctx, loc,
                     fmt::format("can't copy the parameters of {} ({}:{}): it has `...`, a destructured parameter or "
                                 "`**nil`, which the plugin doesn't copy",
-                                label, file.path,
-                                file.line(reinterpret_cast<const pm_node_t *>(method.def))));
+                                label, file.path, file.line(reinterpret_cast<const pm_node_t *>(method.def))));
         return nullopt;
     }
     optional<Sig> sig;
@@ -113,11 +117,9 @@ void addCopiedMethod(core::MutableContext ctx, ast::ClassDef::RHS_store &body, c
     addMethod(ctx, body, loc, name, move(params), move(args), move(returns), singleton);
 }
 
-ConstantName addUnderNesting(core::MutableContext ctx, ast::ClassDef &root, core::LocOffsets loc, const Definition &def,
-                             string_view name, ast::ClassDef::RHS_store body) {
-    auto wrap = [&](bool isClass, const ConstantRef &written, ast::ExpressionPtr inner) {
-        ast::ClassDef::RHS_store rhs;
-        rhs.emplace_back(move(inner));
+void addInDefinition(core::MutableContext ctx, ast::ClassDef &root, core::LocOffsets loc, const Definition &def,
+                     ast::ClassDef::RHS_store body) {
+    auto wrap = [&](bool isClass, const ConstantRef &written, ast::ClassDef::RHS_store rhs) {
         if (isClass) {
             ast::ClassDef::ANCESTORS_store ancestors;
             ancestors.emplace_back(ast::MK::Constant(loc, core::Symbols::todo()));
@@ -125,12 +127,20 @@ ConstantName addUnderNesting(core::MutableContext ctx, ast::ClassDef &root, core
         }
         return ast::MK::Module(loc, loc, constantTree(ctx, loc, written), move(rhs));
     };
-    auto tree = ast::MK::Module(loc, loc, constantTree(ctx, loc, ConstantRef{{string(name)}, false}), move(body));
-    tree = wrap(def.isClass, def.written, move(tree));
+    auto tree = wrap(def.isClass, def.written, move(body));
     for (auto it = def.enclosing.rbegin(); it != def.enclosing.rend(); ++it) {
-        tree = wrap(it->first, it->second, move(tree));
+        ast::ClassDef::RHS_store rhs;
+        rhs.emplace_back(move(tree));
+        tree = wrap(it->first, it->second, move(rhs));
     }
     root.rhs.emplace_back(move(tree));
+}
+
+ConstantName addUnderNesting(core::MutableContext ctx, ast::ClassDef &root, core::LocOffsets loc, const Definition &def,
+                             string_view name, ast::ClassDef::RHS_store body) {
+    ast::ClassDef::RHS_store rhs;
+    rhs.emplace_back(ast::MK::Module(loc, loc, constantTree(ctx, loc, ConstantRef{{string(name)}, false}), move(body)));
+    addInDefinition(ctx, root, loc, def, move(rhs));
     auto fullName = def.fullName;
     fullName.emplace_back(name);
     return fullName;

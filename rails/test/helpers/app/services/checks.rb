@@ -5,6 +5,7 @@ class Checks
   sig { params(h: ApplicationController::HelperMethods).void }
   def application(h)
     T.reveal_type(h.string_param(:x)) # error: Revealed type: `T.nilable(String)`
+    T.reveal_type(h.page_size) # error: Revealed type: `Integer`
     h.string_param(1) # error: Expected `T.any(String, Symbol)` but found `Integer(1)` for argument `key`
     T.reveal_type(h.staff_session?) # error: Revealed type: `T::Boolean`
     T.reveal_type(h.staff_session) # error: Revealed type: `T.nilable(AdminAuth::Session)`
@@ -14,6 +15,8 @@ class Checks
     h.oauth_helper_method
     h.admin_views_helper_method
     h.mailer_helper_method
+    # The app's helper wins over the gem module's, as in Rails.
+    T.reveal_type(h.notice) # error: Revealed type: `Integer`
   end
 
   sig { params(h: DashboardController::HelperMethods).void }

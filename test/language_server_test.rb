@@ -5,6 +5,7 @@
 # plugins: when the indexer's didn't, the first edit to a job made every job's `perform_async` Sidekiq's untyped one,
 # and when the hashing state didn't, an edit to a file a plugin rewrites never preempted a slow path. The app is the
 # rails plugin's `jobs` case, plus a caller that passes a String where IntegrationUpload#perform's sig says Integer.
+# Half-typed code mustn't stop the server either.
 #
 #   ruby test/language_server_test.rb path/to/sorbet
 
@@ -16,7 +17,8 @@ sorbet = File.expand_path(ARGV.fetch(0) { abort 'usage: ruby test/language_serve
 root = File.expand_path('..', __dir__)
 # Every slow path waits this long (`--sleep-in-slow-path`), so an edit can arrive while one runs.
 SLOW_PATH_SLEEP = 2
-# Seconds without a message from the server, while it reports no slow path running: it has finished checking.
+# Seconds without a message from the server, while it reports no slow path running and has answered the request sent
+# after the last edit: it has finished checking.
 QUIET = 1.5
 
 class LanguageServer
@@ -31,11 +33,12 @@ class LanguageServer
     @diagnostics = {}
     @versions = {}
     @operations = [] # the slow paths (and other long operations) the server says are running
-    write(jsonrpc: '2.0', id: 1, method: 'initialize',
-          params: { processId: Process.pid, rootUri: uri('.'), capabilities: {},
-                    initializationOptions: { supportsOperationNotifications: true } })
+    @answered = [] # the ids of the requests it has answered
+    @next_id = 1
+    initialize_id = request('initialize', processId: Process.pid, rootUri: uri('.'), capabilities: {},
+                                          initializationOptions: { supportsOperationNotifications: true })
     notify('initialized', {})
-    settle
+    settle(initialize_id)
   end
 
   # The messages for each file with errors, by path relative to the app.
@@ -44,7 +47,8 @@ class LanguageServer
   end
 
   # An editor change to the file's buffer, opening it first. Waits for the server to finish checking unless `wait` is
-  # false.
+  # false: it answers a request sent after the change only once it has checked the change, so a late result can't
+  # arrive after the wait.
   def edit(relative, text, wait: true)
     unless @versions.key?(relative)
       @versions[relative] = 1
@@ -54,7 +58,26 @@ class LanguageServer
     @versions[relative] += 1
     notify('textDocument/didChange', textDocument: { uri: uri(relative), version: @versions[relative] },
                                      contentChanges: [{ text: text }])
-    settle if wait
+    settle(request('textDocument/hover', textDocument: { uri: uri(relative) }, position: { line: 0, character: 0 })) if wait
+  end
+
+  # Waits until the server says a long operation (a slow path) has started.
+  def wait_for_operation
+    deadline = Time.now + 60
+    until @operations.any?
+      left = deadline - Time.now
+      raise 'the language server started no slow path within a minute' if left <= 0
+
+      message = @messages.pop(timeout: left)
+      raise 'the language server stopped' if message.nil? && !alive?
+
+      handle(message) if message
+    end
+  end
+
+  # Whether the server is still running: the reader stops when its output ends.
+  def alive?
+    @reader.alive? || !@messages.empty?
   end
 
   def close
@@ -70,6 +93,14 @@ class LanguageServer
 
   def notify(method, params)
     write(jsonrpc: '2.0', method: method, params: params)
+  end
+
+  # Sends a request and returns its id.
+  def request(method, params)
+    id = @next_id
+    @next_id += 1
+    write(jsonrpc: '2.0', id: id, method: method, params: params)
+    id
   end
 
   def write(message)
@@ -95,31 +126,39 @@ class LanguageServer
     # The test closed the server: nothing more to read.
   end
 
-  def settle
+  # Waits for the answer to request `id`, then until no operation runs and the server has been quiet for QUIET seconds.
+  def settle(id)
     deadline = Time.now + 120
     loop do
       left = deadline - Time.now
       raise "the language server was still busy after two minutes (running: #{@operations.inspect})" if left <= 0
 
-      message = @messages.pop(timeout: @operations.empty? ? [QUIET, left].min : left)
-      if message.nil?
-        return if @operations.empty?
-
-        next
+      message = @messages.pop(timeout: [QUIET, left].min)
+      if message
+        handle(message)
+      elsif !alive?
+        raise 'the language server stopped'
+      elsif @operations.empty? && @answered.include?(id)
+        return
       end
+    end
+  end
 
-      case message['method']
-      when 'sorbet/showOperation'
-        params = message['params']
-        if params['status'] == 'start'
-          @operations << params['operationName']
-        else
-          @operations.delete(params['operationName'])
-        end
-      when 'textDocument/publishDiagnostics'
-        path = message['params']['uri'].delete_prefix("file://#{File.realpath(@dir)}/").delete_prefix("file://#{@dir}/")
-        @diagnostics[path] = message['params']['diagnostics'].map { |diagnostic| diagnostic['message'] }
+  def handle(message)
+    raise 'the language server stopped' if message.nil?
+
+    @answered << message['id'] if message.key?('id') && !message.key?('method')
+    case message['method']
+    when 'sorbet/showOperation'
+      params = message['params']
+      if params['status'] == 'start'
+        @operations << params['operationName']
+      else
+        @operations.delete(params['operationName'])
       end
+    when 'textDocument/publishDiagnostics'
+      path = message['params']['uri'].delete_prefix("file://#{File.realpath(@dir)}/").delete_prefix("file://#{@dir}/")
+      @diagnostics[path] = message['params']['diagnostics'].map { |diagnostic| diagnostic['message'] }
     end
   end
 end
@@ -176,12 +215,21 @@ Dir.mktmpdir do |dir|
     # Removing the class takes the slow path again, and a blank line in the job, sent while it runs, preempts it.
     text = logged.call do
       server.edit(caller_file, caller_text, wait: false)
-      sleep 0.5
+      server.wait_for_operation
       server.edit(job, "#{job_text}\n\n")
     end
     check.call('a blank line in a job, sent during a slow path, preempts it', text.include?('Preempting slow path'),
                "  #{slow_reasons.(text).join("\n  ")}")
     check.call('the preempted slow path changes no file\'s errors', server.errors == start,
+               "  before: #{start.inspect}\n  after:  #{server.errors.inspect}")
+
+    # Half-typed code: Prism leaves a name after `::` unset, which crashed the plugin (and the server) on this keystroke.
+    server.edit(caller_file, "#{caller_text}class TypingJob < BoxUploadJob::\n")
+    check.call('a constant path with nothing after `::` leaves the server running',
+               server.errors[caller_file]&.any? { |message| message.include?('expected constant name following "::"') },
+               "  #{caller_file}: #{server.errors[caller_file].inspect}")
+    server.edit(caller_file, caller_text)
+    check.call('the file has its errors back once the constant is finished', server.errors == start,
                "  before: #{start.inspect}\n  after:  #{server.errors.inspect}")
 
     File.write(module_file, File.read(module_file).sub('action_id: Integer', 'action_id: String'))

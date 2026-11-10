@@ -1,7 +1,8 @@
 # typed: true
 # Macros the plugin can't read: an error at each, and the rest are still written.
-class Unreadable < ApplicationRecord # error: app/models/concerns/bad_macros.rb line 9: can't read this `scope`
+class Unreadable < ApplicationRecord # error: app/models/concerns/bad_macros.rb line 9: can't read this `scope` # error: app/models/concerns/legacy_macros.rb line 6: can't read `has_many` in `self.included`
   include BadMacros
+  include LegacyMacros
 
   self.table_name = 'widgets'
 
@@ -17,6 +18,9 @@ class Unreadable < ApplicationRecord # error: app/models/concerns/bad_macros.rb 
     scope :nested, -> {} # error: can't read `scope` here: the plugin reads it only directly in a class body
     attribute :nested_attribute, :string # error: can't read `attribute` here: the plugin reads it only directly in a class body
     has_many :nested_association # error: can't read `has_many` here: the plugin reads it only directly in a class body
+  end
+  with_options(dependent: :destroy) do |assoc|
+    assoc.has_many :receiver_association # error: can't read `has_many` here: the plugin reads it only directly in a class body or a concern's `included` block, with no receiver
   end
   scope :fine, -> {}
 

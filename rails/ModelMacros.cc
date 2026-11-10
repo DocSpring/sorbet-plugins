@@ -350,7 +350,7 @@ optional<string> valueClass(const pm_node_t *node) {
         case PM_STRING_NODE:
             return "String";
         case PM_SYMBOL_NODE:
-            return "Symbol";
+            return "String"; // ActiveRecord::Enum stores a Symbol value as its name.
         default:
             return nullopt;
     }
@@ -374,8 +374,11 @@ optional<Values> readValues(const App &app, const Definition &home, const pm_nod
         }
     };
     switch (PM_NODE_TYPE(node)) {
-        case PM_HASH_NODE: {
-            auto &elements = reinterpret_cast<const pm_hash_node_t *>(node)->elements;
+        case PM_HASH_NODE:
+        case PM_KEYWORD_HASH_NODE: { // `enum :status, active: 0`: its values written as keywords
+            auto &elements = PM_NODE_TYPE_P(node, PM_HASH_NODE)
+                                 ? reinterpret_cast<const pm_hash_node_t *>(node)->elements
+                                 : reinterpret_cast<const pm_keyword_hash_node_t *>(node)->elements;
             for (size_t i = 0; i < elements.size; i++) {
                 if (!PM_NODE_TYPE_P(elements.nodes[i], PM_ASSOC_NODE)) {
                     return unreadable();
@@ -459,7 +462,9 @@ struct IgnoredColumns {
 struct ShrineAttachmentInclude {
     string name;
     UploaderPlugins plugins;
-    size_t level = 0;
+    size_t level;
+    Definition home;       // the class, or the concern whose `included` block includes it
+    const pm_node_t *stat; // the `include` statement
 };
 
 // The `Uploader.attachment(:name)` call of `include Uploader.attachment(:name)`, or of `T.unsafe(self).include ...`
@@ -518,7 +523,9 @@ public:
         this->level = level;
         ClassMacros out;
         vector<Source> sources{{def, def.body}};
-        for (auto &concern : includedConcerns(app, def)) {
+        auto concerns = includedConcerns(app, def);
+        includedHooks(def, concerns);
+        for (auto &concern : concerns) {
             for (auto block : concern.includedBlocks()) {
                 sources.emplace_back(Source{concern, statements(block->body)});
             }
@@ -655,7 +662,7 @@ private:
             problem(home, stat, fmt::format("can't type the attachment `{}`: {}", *name, error));
             return;
         }
-        out.attachments.emplace_back(ShrineAttachmentInclude{*name, move(*plugins), level});
+        out.attachments.emplace_back(ShrineAttachmentInclude{*name, move(*plugins), level, home, stat});
     }
 
     void associationCall(const Definition &home, const pm_call_node_t *call, Association::Macro macro,
@@ -717,14 +724,44 @@ private:
         out.associationSources.emplace_back(join(home.fullName));
     }
 
-    // A macro call inside another statement (a block, an `if`): Rails runs it, but the plugin doesn't read it.
+    // A macro call inside another statement (a block, an `if`), or called on a block's parameter (`with_options do
+    // |assoc|`): Rails runs it, but the plugin doesn't read it.
     void nested(const Definition &home, const pm_node_t *stat) {
         auto isMacro = [&](string_view name) { return isModelMacro(name) || macros.contains(name); };
-        for (auto call : macroCalls(*home.file, stat, isMacro)) {
+        for (auto call : macroCalls(*home.file, stat, isMacro, true)) {
             problem(home, reinterpret_cast<const pm_node_t *>(call),
                     fmt::format("can't read `{}` here: the plugin reads it only directly in a class body or a "
-                                "concern's `included` block",
+                                "concern's `included` block, with no receiver",
                                 callName(*home.file, call)));
+        }
+    }
+
+    // Macros a plain module's `def self.included(base)` runs on the class (`base.has_many`), which the plugin doesn't
+    // read: a concern's `included do ... end` block is what it reads.
+    void includedHooks(const Definition &def, const vector<Definition> &concerns) {
+        auto isMacro = [&](string_view name) { return isModelMacro(name) || macros.contains(name); };
+        set<string> seen;
+        vector<const Definition *> includers{&def};
+        for (auto &concern : concerns) {
+            includers.emplace_back(&concern);
+        }
+        for (auto includer : includers) {
+            for (auto &ref : includer->mixins("include")) {
+                auto module = resolve(app, includer->nesting, ref);
+                if (!module || module->isClass || !seen.insert(join(module->fullName)).second) {
+                    continue;
+                }
+                auto hook = module->method("included", true);
+                if (!hook || hook->def->body == nullptr) {
+                    continue;
+                }
+                for (auto call : macroCalls(*module->file, hook->def->body, isMacro, true)) {
+                    problem(*module, reinterpret_cast<const pm_node_t *>(call),
+                            fmt::format("can't read `{}` in `self.included`: the plugin reads it only directly in a "
+                                        "class body or a concern's `included do ... end` block",
+                                        callName(*module->file, call)));
+                }
+            }
         }
     }
 
@@ -874,7 +911,17 @@ private:
         auto macroName = callName(*home.file, call);
         auto args = splitArguments(call);
         auto name = args.positional.empty() ? nullopt : nameLiteral(args.positional[0]);
-        if (!name || args.positional.size() != 2 || !args.readable || !args.splats.empty()) {
+        // With no values argument, `enum` takes every keyword as a value, and no options.
+        const pm_node_t *valuesNode = args.positional.size() == 2 ? args.positional[1] : nullptr;
+        if (macro == nullptr && args.positional.size() == 1 && !args.keywords.empty() && call->arguments != nullptr) {
+            auto &arguments = call->arguments->arguments;
+            auto last = arguments.nodes[arguments.size - 1];
+            if (PM_NODE_TYPE_P(last, PM_KEYWORD_HASH_NODE)) {
+                valuesNode = last;
+                args.keywords.clear();
+            }
+        }
+        if (!name || valuesNode == nullptr || !args.readable || !args.splats.empty()) {
             problem(home, node,
                     fmt::format("can't read this `{}`: the plugin reads a name that's a symbol or string, the values, "
                                 "and options written out (`key: value`)",
@@ -947,7 +994,7 @@ private:
         auto suffix = affix("suffix", false);
         auto scopes = flag("scopes");
         auto instanceMethods = flag("instance_methods");
-        auto values = readValues(app, home, args.positional[1], *name, 0, error);
+        auto values = readValues(app, home, valuesNode, *name, 0, error);
         if (!error.empty()) {
             problem(home, node, error);
             return;
@@ -1151,8 +1198,33 @@ ModelAssociations modelAssociations(const App &app, const Model &model, vector<M
     return associationsOf(model, readClasses(app, model, problems), problems);
 }
 
+// The statement of the class's body that includes `concern`, itself or through the concerns it includes.
+const pm_node_t *includeOf(const App &app, const Definition &def, const Definition &concern) {
+    auto name = join(concern.fullName);
+    for (auto stat : def.body) {
+        auto call = asCall(stat);
+        if (call == nullptr || call->receiver != nullptr || callName(*def.file, call) != "include") {
+            continue;
+        }
+        for (auto arg : arguments(call)) {
+            auto ref = constantRef(*def.file, arg);
+            auto module = ref ? resolve(app, def.nesting, *ref) : nullopt;
+            if (!module || module->isClass) {
+                continue;
+            }
+            auto dependencies = includedConcerns(app, *module);
+            if (join(module->fullName) == name ||
+                absl::c_any_of(dependencies, [&](auto &dependency) { return join(dependency.fullName) == name; })) {
+                return stat;
+            }
+        }
+    }
+    return nullptr;
+}
+
 string modelMacros(const App &app, const Model &model, const Inflector &inflector, const Table &table,
-                   const optional<string> &primaryKey, vector<MacroProblem> &problems) {
+                   const optional<string> &primaryKey, vector<MacroProblem> &problems,
+                   vector<AttachmentInclude> &attachmentIncludes) {
     auto classes = readClasses(app, model, problems);
 
     // Attributes: Rails applies a superclass's changes first, and each class's in order. The plugin reads a class's
@@ -1259,26 +1331,45 @@ string modelMacros(const App &app, const Model &model, const Inflector &inflecto
         out += "end\n\n";
     }
 
-    // Shrine attachments, a superclass's first. A method that the model, or a class between it and the one that
-    // includes the attachment, defines itself is its own (ShrineAttachments wrote only those the attachment's module
-    // defines for the model).
-    string attachments;
-    for (auto declared = classes.rbegin(); declared != classes.rend(); declared++) {
-        for (auto &attachment : declared->attachments) {
-            attachments += attachmentMethods(attachment.plugins, attachment.name, [&](string_view method) {
-                for (size_t level = 0; level <= attachment.level && level < model.chain.size(); level++) {
-                    if (model.chain[level].method(method)) {
-                        return true;
-                    }
-                }
-                return false;
-            });
+    // Shrine attachments. Each one's methods go in a module of their own, included where Ruby includes the
+    // attachment's module (see AttachmentInclude), so a module included after it overrides its methods as in Ruby.
+    // A name declared more than once (again in an STI subclass, or twice in one class) is written once, from the
+    // most specific declaration, which is the one Ruby finds. A method that the model, or a class between it and the
+    // one that includes the attachment, defines itself is its own (ShrineAttachments wrote only those the
+    // attachment's module defines for the model).
+    vector<const ShrineAttachmentInclude *> chosen;
+    set<string, less<>> attachmentNames;
+    for (auto &declared : classes) {
+        for (auto attachment = declared.attachments.rbegin(); attachment != declared.attachments.rend(); attachment++) {
+            if (attachmentNames.insert(attachment->name).second) {
+                chosen.emplace_back(&*attachment);
+            }
         }
     }
-    if (!attachments.empty()) {
-        out += fmt::format(
-            "include GeneratedShrineAttachmentMethods\n\nmodule GeneratedShrineAttachmentMethods\n{}end\n\n",
-            attachments);
+    reverse(chosen.begin(), chosen.end());
+    auto &self = model.chain.front();
+    for (auto attachment : chosen) {
+        auto methods = attachmentMethods(attachment->plugins, attachment->name, [&](string_view method) {
+            for (size_t level = 0; level <= attachment->level && level < model.chain.size(); level++) {
+                if (model.chain[level].method(method)) {
+                    return true;
+                }
+            }
+            return false;
+        });
+        if (methods.empty()) {
+            continue;
+        }
+        AttachmentInclude placement{"GeneratedShrineAttachmentMethods_" + attachment->name};
+        out += fmt::format("module {}\n{}end\n\n", placement.module, methods);
+        if (attachment->level > 0) {
+            placement.first = true;
+        } else if (attachment->home.fullName == self.fullName && attachment->home.file->path == self.file->path) {
+            placement.after = attachment->stat;
+        } else {
+            placement.after = includeOf(app, self, attachment->home);
+        }
+        attachmentIncludes.emplace_back(move(placement));
     }
 
     out += associationMethods(app, inflector, associationsOf(model, classes, problems), problems);

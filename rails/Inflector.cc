@@ -249,7 +249,8 @@ string Inflector::underscore(string_view camelCased) const {
         bool matched = false;
         if (afterAlnum || wordBoundary(word, i)) {
             for (auto &acronym : acronymsByLength) {
-                if (word.compare(i, acronym.size(), acronym) != 0) {
+                // An empty one would match without moving on.
+                if (acronym.empty() || word.compare(i, acronym.size(), acronym) != 0) {
                     continue;
                 }
                 auto end = i + acronym.size();
@@ -409,7 +410,11 @@ Inflector Inflector::forApp(const App &app, string &error) {
                 }
                 words.emplace_back(move(*word));
             }
-            if (name == "acronym" && words.size() == 1) {
+            if (name == "acronym" && words.size() == 1 && words[0].empty()) {
+                // ActiveSupport would match it nowhere; the plugin's matcher would match it everywhere.
+                fail(rule, "an empty acronym");
+                return inflector;
+            } else if (name == "acronym" && words.size() == 1) {
                 inflector.acronym(words[0]);
             } else if (name == "irregular" && words.size() == 2 && !words[0].empty() && !words[1].empty()) {
                 inflector.irregular(words[0], words[1]);

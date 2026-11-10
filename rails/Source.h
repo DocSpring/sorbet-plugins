@@ -64,6 +64,10 @@ public:
         return root_;
     }
     std::string_view name(pm_constant_id_t id) const;
+    // Prism found a syntax error, which Sorbet reports in this file: half-typed code in the language server.
+    bool hasSyntaxError() const {
+        return parser.error_list.size != 0;
+    }
     std::string_view slice(const pm_location_t &loc) const;
     // The line of a node, for error messages.
     int line(const pm_node_t *node) const;
@@ -161,9 +165,11 @@ Arguments splitArguments(const pm_call_node_t *call);
 // A hash literal's (`{ key: value }`) pairs and splats, as `Arguments::keywords` and `splats`.
 Arguments hashArguments(const pm_hash_node_t *hash);
 // The calls (on `self`, or with no receiver) whose name `isMacro` accepts, anywhere in a node, but not in the methods,
-// classes and lambdas it defines: the macros a class body runs.
+// classes and lambdas it defines: the macros a class body runs. With `localReceivers`, also those called on a local
+// variable (`assoc.has_many` in `with_options do |assoc|`, `base.has_many` in `def self.included(base)`).
 std::vector<const pm_call_node_t *> macroCalls(const RubyFile &file, const pm_node_t *node,
-                                               const std::function<bool(std::string_view)> &isMacro);
+                                               const std::function<bool(std::string_view)> &isMacro,
+                                               bool localReceivers = false);
 
 } // namespace sorbet::plugins::rails
 

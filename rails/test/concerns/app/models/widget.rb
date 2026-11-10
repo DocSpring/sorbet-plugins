@@ -25,3 +25,6 @@ Widget.plain = 1
 Widget.plain? # error: Method `plain?` does not exist on `T.class_of(Widget)`
 Widget.new.plain
 Widget.new.plain? # error: Method `plain?` does not exist on `Widget`
+# `self.class_attribute` in the `included` block.
+T.reveal_type(Widget.explicit) # error: Revealed type: `T.untyped`
+Widget.new.explicit?

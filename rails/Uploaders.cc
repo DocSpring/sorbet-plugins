@@ -1,20 +1,20 @@
-// Uploaders: Shrine. An uploader is an app class whose superclasses up to `Shrine` are all the app's. Each `plugin`
-// call in its class body mixes in the plugin's modules, as Shrine's `plugin` does: the uploader includes
+// Uploaders: Shrine. An uploader is a class in app/ or lib/ whose superclasses up to `Shrine` are all the app's. Each
+// `plugin` call in its class body mixes in the plugin's modules, as Shrine's `plugin` does: the uploader includes
 // `InstanceMethods` and extends `ClassMethods`, and its own `Attacher` and `UploadedFile` subclasses (Shrine creates
 // them in `Shrine.inherited`, under its superclass's) include `AttacherMethods` and `FileMethods` and extend
 // `AttacherClassMethods` and `FileClassMethods`. A plugin is one of Shrine's, by name (`plugin :derivatives`, from the
-// table of Shrine 3.10's below), or an app module (`plugin KeepFilesOnSoftDelete`), read from its file with the
-// plugins its `load_dependencies` loads. The plugins a Shrine plugin loads itself come from gem code, so the app's
-// narrowed ShrineUploaders compiler writes them. A `plugin` call under an `if` or `unless` counts: the plugin types
-// what the uploader may load.
+// table of Shrine 3.10's below, with the plugins its `load_dependencies` loads first), or an app module (`plugin
+// KeepFilesOnSoftDelete`), read from its file with the plugins its `load_dependencies` loads. A `plugin` call under an
+// `if` or `unless` counts: the plugin types what the uploader may load. The app's GemMixins compiler raises for a
+// `plugin` call anywhere else, which neither side would write.
 //
 // Attachments: `include Uploader.attachment(:name)` in a model (read in ModelMacros.cc) gets the methods that its
 // uploader's plugins, its superclasses' and the global ones (`Shrine.plugin` in config/initializers/shrine.rb) define
-// for an attachment, typed as the app's ShrineAttachments compiler typed them: `name` (taking a derivative's name with
-// the derivatives plugin, and returning a hash of versions too when a plugin's `configure` sets `opts[:versions]`),
-// `name=`, `name_attacher`, `name_url`, `name_changed?`, `cached_name_data` and the derivatives plugin's
-// `name_derivatives` and `name_derivatives!`. Activerecord's `reload`, and a method the model defines itself, are
-// left out.
+// for an attachment, typed as the app's ShrineAttachments compiler, which this replaces, typed them: `name` (taking a
+// derivative's name with the derivatives plugin, and returning a hash of versions too when a plugin's `configure` sets
+// `opts[:versions]`), `name=`, `name_attacher`, `name_url`, `name_changed?`, `cached_name_data` and the derivatives
+// plugin's `name_derivatives` and `name_derivatives!`. Activerecord's `reload`, and a method the model defines itself,
+// are left out.
 
 #include "Rails.h"
 #include "Template.h"

@@ -23,3 +23,6 @@ module ActiveSupport
   class Duration; end
   class TimeWithZone; end
 end
+module ActionMailer
+  class MailDeliveryJob < ActiveJob::Base; end
+end

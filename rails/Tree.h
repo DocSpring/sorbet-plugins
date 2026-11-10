@@ -46,6 +46,11 @@ void addCopiedMethod(core::MutableContext ctx, ast::ClassDef::RHS_store &body, c
                      std::string_view name, const CopiedMethod &method, bool singleton,
                      const std::optional<ConstantRef> &returns = std::nullopt);
 
+// Appends `body` to the root, inside `def` reopened in its own lexical nesting (each enclosing module or class written
+// as in `def`'s file), so constants in it resolve as they do in `def`'s body, through `def`'s ancestors too.
+void addInDefinition(core::MutableContext ctx, ast::ClassDef &root, core::LocOffsets loc, const Definition &def,
+                     ast::ClassDef::RHS_store body);
+
 // Appends `module <name>; <body>; end` to the root, inside `def`'s own lexical nesting reopened (each enclosing
 // module or class written as in `def`'s file), so constants in the body resolve as they do in that file. Returns the
 // module's full name.

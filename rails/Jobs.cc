@@ -2,10 +2,12 @@
 // ActiveJob jobs, from the job's `perform` and its sig. The same methods Tapioca's SidekiqWorker and ActiveJob
 // compilers wrote.
 //
-// A job is a class in `app/jobs/` with a `perform` of its own, from an included module (followed through modules
-// that include it), or from its superclass. Its kind comes from its file (`include Sidekiq::Job` or
-// `Sidekiq::Worker`), else from its superclass's file by Zeitwerk path, up to four steps, stopping at a Sidekiq
-// include or at `ApplicationJob` / `ActiveJob::Base`; with no answer it's a Sidekiq job.
+// A job is a class in `app/jobs/` with a `perform` of its own, from an included module (the last one included first,
+// followed through modules that include it, as Ruby looks it up), or from its superclass. Its kind comes from its
+// file (`include Sidekiq::Job` or `Sidekiq::Worker`, or a module of ours that includes one), else from its
+// superclass's file by Zeitwerk path, stopping at a Sidekiq include or at `ApplicationJob` / `ActiveJob::Base`.
+// When the chain ends anywhere else (a gem superclass, a superclass that isn't a constant, none at all) the job's
+// file gets a plugin error rather than a guess.
 
 #include "Rails.h"
 #include "Template.h"
@@ -16,7 +18,8 @@ namespace sorbet::plugins::rails {
 
 namespace {
 
-constexpr int MAX_STEPS = 4;
+// How far up a job's superclasses and through its modules' includes the plugin looks, as Lineage does.
+constexpr int MAX_STEPS = 10;
 
 enum class JobKind { Sidekiq, ActiveJob };
 
@@ -25,30 +28,59 @@ bool isSidekiqModule(const ConstantRef &ref) {
     return name == "Sidekiq::Worker" || name == "Sidekiq::Job";
 }
 
-JobKind jobKind(const App &app, Definition def) {
-    for (int step = 0;; step++) {
-        for (auto &mixin : def.mixins("include")) {
-            if (isSidekiqModule(mixin)) {
-                return JobKind::Sidekiq;
-            }
+// Whether the definition includes Sidekiq's module, itself or through modules of ours it includes.
+bool includesSidekiq(const App &app, const Definition &def, int depth) {
+    for (auto &mixin : def.mixins("include")) {
+        if (isSidekiqModule(mixin)) {
+            return true;
+        }
+        if (depth >= MAX_STEPS) {
+            continue;
+        }
+        auto module = resolve(app, def.nesting, mixin);
+        if (module && !module->isClass && includesSidekiq(app, *module, depth + 1)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// The job's kind, or nullopt with `error` saying why the plugin can't tell.
+optional<JobKind> jobKind(const App &app, Definition def, string &error) {
+    auto job = join(def.fullName);
+    for (int step = 0; step < MAX_STEPS; step++) {
+        if (includesSidekiq(app, def, 0)) {
+            return JobKind::Sidekiq;
+        }
+        if (def.superclass == nullptr) {
+            error = fmt::format("can't tell what kind of job `{}` is: `{}` neither includes Sidekiq::Job nor has a "
+                                "superclass",
+                                job, join(def.fullName));
+            return nullopt;
         }
         auto superclass = constantRef(*def.file, def.superclass);
         if (!superclass) {
-            return JobKind::Sidekiq;
+            error = fmt::format("can't tell what kind of job `{}` is: `{}`'s superclass isn't a constant", job,
+                                join(def.fullName));
+            return nullopt;
         }
         auto name = join(superclass->name);
         if (name == "ApplicationJob" || name == "ActiveJob::Base") {
             return JobKind::ActiveJob;
         }
-        if (step + 1 >= MAX_STEPS) {
-            return JobKind::Sidekiq;
-        }
         auto parent = resolve(app, def.outerNesting(), *superclass);
         if (!parent) {
-            return JobKind::Sidekiq;
+            error = fmt::format("can't tell what kind of job `{}` is: its superclass `{}` isn't in the app. Inherit "
+                                "from ApplicationJob, or include Sidekiq::Job",
+                                job, name);
+            return nullopt;
         }
         def = *parent;
     }
+    error = fmt::format("can't tell what kind of job `{}` is: it's more than {} superclasses from ApplicationJob or "
+                        "a Sidekiq::Job include",
+                        job, MAX_STEPS);
+    return nullopt;
 }
 
 struct Perform {
@@ -61,8 +93,10 @@ optional<Perform> moduleProvidingPerform(const App &app, const Definition &def, 
     if (depth > MAX_STEPS) {
         return nullopt;
     }
-    for (auto &mixin : def.mixins("include")) {
-        auto module = resolve(app, def.nesting, mixin);
+    // The last module included comes first in the class's ancestors.
+    auto mixins = def.mixins("include");
+    for (auto it = mixins.rbegin(); it != mixins.rend(); ++it) {
+        auto module = resolve(app, def.nesting, *it);
         if (!module || module->isClass) {
             continue;
         }
@@ -115,7 +149,7 @@ ast::ExpressionPtr tAny(core::MutableContext ctx, core::LocOffsets loc, ast::Sen
 // addTypeAliases wrote for them.
 void addSidekiqMethods(core::MutableContext ctx, ast::ClassDef::RHS_store &body, core::LocOffsets loc,
                        const Perform &perform, const vector<Param> &params, const Sig *sig,
-                       const optional<ConstantName> &aliases) {
+                       const optional<vector<ConstantName>> &aliases) {
     for (auto name : {"perform_async", "perform_in", "perform_at"}) {
         ast::MethodDef::PARAMS_store treeParams;
         ast::Send::ARGS_store args;
@@ -140,9 +174,7 @@ void addSidekiqMethods(core::MutableContext ctx, ast::ClassDef::RHS_store &body,
         if (aliases) {
             for (size_t index = 0; index < params.size(); index++) {
                 args.emplace_back(ast::MK::Symbol(loc, ctx.state.enterNameUTF8(params[index].name)));
-                auto alias = *aliases;
-                alias.emplace_back(fmt::format("Param{}", index));
-                args.emplace_back(constantTree(ctx, loc, absolute(alias)));
+                args.emplace_back(constantTree(ctx, loc, absolute((*aliases)[index])));
             }
         } else {
             auto copied = sigArgs(ctx, loc, *perform.owner.file, params, sig);
@@ -154,24 +186,30 @@ void addSidekiqMethods(core::MutableContext ctx, ast::ClassDef::RHS_store &body,
     }
 }
 
-// `perform`'s parameter types as `Param<n> = T.type_alias { <type> }` in a module named `name` inside the nesting of
-// the file `perform` is in, so their constants resolve as they do there. Returns the module's full name.
-optional<ConstantName> addTypeAliases(core::MutableContext ctx, ast::ClassDef &root, core::LocOffsets loc,
-                                      const Perform &perform, const vector<Param> &params, const Sig *sig,
-                                      string_view name) {
+// `perform`'s parameter types as `<prefix>Param<n> = T.type_alias { <type> }` in the body of the class or module
+// that defines `perform`, reopened, so their constants resolve as the sig's do there: lexically, then through its
+// ancestors. Returns the aliases' full names.
+optional<vector<ConstantName>> addTypeAliases(core::MutableContext ctx, ast::ClassDef &root, core::LocOffsets loc,
+                                              const Perform &perform, const vector<Param> &params, const Sig *sig,
+                                              string_view prefix) {
     auto args = sigArgs(ctx, loc, *perform.owner.file, params, sig);
     if (!args) {
         return nullopt;
     }
     ast::ClassDef::RHS_store body;
+    vector<ConstantName> names;
     for (size_t index = 0; index < params.size(); index++) {
-        auto constant = ast::MK::UnresolvedConstant(loc, ast::MK::EmptyTree(),
-                                                    ctx.state.enterNameConstant(fmt::format("Param{}", index)));
+        auto name = fmt::format("{}Param{}", prefix, index);
+        auto constant = ast::MK::UnresolvedConstant(loc, ast::MK::EmptyTree(), ctx.state.enterNameConstant(name));
         auto alias = ast::MK::Send0Block(loc, ast::MK::T(loc), core::Names::typeAlias(), loc,
                                          ast::MK::Block0(loc, move((*args)[index * 2 + 1])));
         body.emplace_back(ast::MK::Assign(loc, move(constant), move(alias)));
+        auto fullName = perform.owner.fullName;
+        fullName.emplace_back(name);
+        names.emplace_back(move(fullName));
     }
-    return addUnderNesting(ctx, root, loc, perform.owner, name, move(body));
+    addInDefinition(ctx, root, loc, perform.owner, move(body));
+    return names;
 }
 
 void addActiveJobMethods(core::MutableContext ctx, ast::ClassDef::RHS_store &body, core::LocOffsets loc,
@@ -228,9 +266,16 @@ void rewriteJobs(core::MutableContext ctx, ast::ClassDef &root, const App &app, 
             continue;
         }
         auto loc = zeroAt(*tree);
-        // The class's kind is in its own Zeitwerk file, whichever file reopens it.
+        // The class's kind is in its own Zeitwerk file, whichever file reopens it, which reports when it can't tell.
         auto main = resolve(app, {}, ConstantRef{def.fullName, true});
-        auto kind = jobKind(app, main ? *main : def);
+        string error;
+        auto kind = jobKind(app, main ? *main : def, error);
+        if (!kind) {
+            if (!main || main->file->path == file->path) {
+                reportError(ctx, loc, error);
+            }
+            continue;
+        }
         if (kind == JobKind::ActiveJob && !perform->own) {
             continue; // Tapioca's ActiveJob compiler only types a perform the job defines itself.
         }
@@ -242,7 +287,7 @@ void rewriteJobs(core::MutableContext ctx, ast::ClassDef &root, const App &app, 
         const Sig *sigPtr = copied->sig ? &*copied->sig : nullptr;
 
         if (perform->own) {
-            if (kind == JobKind::Sidekiq) {
+            if (*kind == JobKind::Sidekiq) {
                 addSidekiqMethods(ctx, tree->rhs, loc, *perform, copied->params, sigPtr, nullopt);
             } else {
                 addActiveJobMethods(ctx, tree->rhs, loc, *perform, *copied);
@@ -251,14 +296,14 @@ void rewriteJobs(core::MutableContext ctx, ast::ClassDef &root, const App &app, 
         }
         // perform is in another file (a module the job includes, or a superclass). The methods are still the job's
         // own: Sorbet ranks the module Sidekiq::Job's `mixes_in_class_methods` adds above any module the job extends,
-        // whatever the order. Their types are aliases inside that file's nesting, so the sig's constants resolve as
-        // they do there, written once, in the job's own file.
+        // whatever the order. Their types are aliases in the body of the class or module that defines `perform`, so the
+        // sig's constants resolve as they do there, written once, in the job's own file.
         if (!main || main->file->path != file->path) {
             continue;
         }
         auto job = join(def.fullName);
         auto aliases = addTypeAliases(ctx, root, loc, *perform, copied->params, sigPtr,
-                                      "SorbetSidekiqTypes_" + replaceAll(job, "::", "__"));
+                                      "SorbetSidekiqTypes_" + replaceAll(job, "::", "__") + "_");
         if (aliases) {
             addSidekiqMethods(ctx, tree->rhs, loc, *perform, copied->params, sigPtr, aliases);
         }

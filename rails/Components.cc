@@ -1,5 +1,5 @@
-// Components: the methods ViewComponent defines for each `renders_one` and `renders_many` in a class body, as the
-// app's ViewComponentSlots compiler wrote them. Slots are untyped: a slot delegates to its component.
+// Components: the methods ViewComponent defines for each `renders_one` and `renders_many` in a class body, as the app's
+// ViewComponentSlots compiler, which this replaces, wrote them. Slots are untyped: a slot delegates to its component.
 //
 // - `renders_one :footer`: `footer` (`T.untyped`), `footer?`, `with_footer(*args, **kwargs, &block)` and
 //   `with_footer_content(content)`.
@@ -10,7 +10,9 @@
 //   type's `as:`, or by the slot (singular for `renders_many`) and the type: `renders_many :items, types: { link:
 //   LinkComponent }` gives `with_item_link`. No collection setter.
 //
-// A subclass gets its parent's slots by inheritance. A slot the plugin can't read is an error: a name that isn't a
+// Each slot's getter and `?` go in the class's GeneratedSlotMethods module, included first, as ViewComponent defines
+// them, so the class can override one and call `super`; the setters go on the class. A subclass gets its parent's
+// slots by inheritance. A slot the plugin can't read is an error: a name that isn't a
 // symbol or string, a second argument that isn't a component (a constant), a lambda, a class name or `types:` written
 // out with symbol keys and literal `as:` names, and a call inside a block or condition.
 
@@ -101,8 +103,10 @@ optional<vector<string>> typeNames(const RubyFile &file, const pm_node_t *types,
 }
 
 // The slot's methods, or nullopt with `error` set.
+// A slot's methods: its setters, returned, and its getter and `?`, added to `getters`, which go in the class's
+// GeneratedSlotMethods (ViewComponent defines them there, so the class can override them and call `super`).
 optional<string> slotMethods(const RubyFile &file, const pm_call_node_t *call, const Inflector &inflector,
-                             string &error) {
+                             string &getters, string &error) {
     auto macro = callName(file, call);
     auto many = macro == "renders_many";
     auto args = splitArguments(call);
@@ -128,9 +132,14 @@ optional<string> slotMethods(const RubyFile &file, const pm_call_node_t *call, c
     } else if (args.positional.size() == 2 && PM_NODE_TYPE_P(args.positional[1], PM_HASH_NODE)) {
         options = hashArguments(reinterpret_cast<const pm_hash_node_t *>(args.positional[1]));
     }
-    string out = fmt::format("sig {{ returns({1}) }}\ndef {0}; end\n\n"
-                             "sig {{ returns(T::Boolean) }}\ndef {0}?; end\n\n",
-                             *name, many ? "T::Array[T.untyped]" : "T.untyped");
+    auto slotGetters = fmt::format("sig {{ returns({1}) }}\ndef {0}; end\n\n"
+                                   "sig {{ returns(T::Boolean) }}\ndef {0}?; end\n\n",
+                                   *name, many ? "T::Array[T.untyped]" : "T.untyped");
+    auto done = [&](string setters) -> optional<string> {
+        getters += slotGetters;
+        return setters;
+    };
+    string out;
     // `types:` makes it polymorphic: a pair of setters per type. ViewComponent ignores a hash's other keys.
     if (options) {
         auto types = absl::c_find_if(options->keywords, [](const auto &pair) { return pair.first == "types"; });
@@ -145,20 +154,20 @@ optional<string> slotMethods(const RubyFile &file, const pm_call_node_t *call, c
         for (auto &setter : *names) {
             out += setters(setter);
         }
-        return out;
+        return done(move(out));
     }
     if (args.positional.size() == 2 && !isRenderable(file, args.positional[1])) {
         return unreadable(secondArgument);
     }
     if (!many) {
         out += setters(*name);
-        return out;
+        return done(move(out));
     }
     out += setters(inflector.singularize(*name));
     out += fmt::format("sig {{ params(collection_args: T.untyped, block: T.untyped).returns(T.untyped) }}\n"
                        "def with_{0}(collection_args = T.unsafe(nil), &block); end\n\n",
                        *name);
-    return out;
+    return done(move(out));
 }
 
 } // namespace
@@ -204,14 +213,19 @@ void rewriteComponents(core::MutableContext ctx, ast::ClassDef &root, const App 
             continue;
         }
         string source;
+        string getters;
         for (auto call : slots) {
             string error;
-            auto methods = slotMethods(*file, call, *inflector, error);
+            auto methods = slotMethods(*file, call, *inflector, getters, error);
             if (!methods) {
                 report(reinterpret_cast<const pm_node_t *>(call), error);
                 continue;
             }
             source += *methods;
+        }
+        if (!getters.empty()) {
+            source =
+                fmt::format("include GeneratedSlotMethods\n\nmodule GeneratedSlotMethods\n{}end\n\n", getters) + source;
         }
         if (!source.empty()) {
             // First in the body, so a `private` in the class doesn't apply to them: ViewComponent's are public.

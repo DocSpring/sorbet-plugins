@@ -15,3 +15,18 @@ CREATE TABLE public.albums (
 CREATE TABLE public.galleries (
     id bigint NOT NULL
 );
+
+CREATE TABLE public.books (
+    id bigint NOT NULL,
+    cover_data text
+);
+
+CREATE TABLE public.magazines (
+    id bigint NOT NULL,
+    cover_data text
+);
+
+CREATE TABLE public.twins (
+    id bigint NOT NULL,
+    image_data text
+);

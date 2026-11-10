@@ -47,7 +47,9 @@ public:
         // A component's slots: ViewComponent's `renders_one` and `renders_many`.
         auto components = isUnder("app/") && (source.find("renders_one") != string_view::npos ||
                                               source.find("renders_many") != string_view::npos);
-        if (!jobs && !helpers && !concerns && !models && !components) {
+        // Shrine uploaders are classes with a superclass too, in app/ or lib/.
+        auto uploaders = models || (isUnder("lib/") && source.find(" < ") != string_view::npos);
+        if (!jobs && !helpers && !concerns && !models && !uploaders && !components) {
             return;
         }
         auto file = make_shared<rails::RubyFile>(string(path), string(source));
@@ -65,7 +67,8 @@ public:
         }
         if (models) {
             rails::rewriteModels(ctx, classDef, *app, file);
-            // Shrine uploaders are classes with a superclass too.
+        }
+        if (uploaders) {
             rails::rewriteUploaders(ctx, classDef, *app, file);
         }
         if (components) {

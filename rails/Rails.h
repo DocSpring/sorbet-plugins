@@ -129,10 +129,21 @@ ModelAssociations modelAssociations(const App &app, const Model &model, std::vec
 std::string associationMethods(const App &app, const Inflector &inflector, const ModelAssociations &associations,
                                std::vector<MacroProblem> &problems);
 
+// Where the model's class body includes one of the modules modelMacros writes for its Shrine attachments: where Ruby
+// includes the attachment's own module. After `after` (a statement of the model's body: the attachment's `include`,
+// or the `include` of the concern whose `included` block has it), first in the body (a superclass's attachment), or
+// else at the end.
+struct AttachmentInclude {
+    std::string module; // inside the model
+    const pm_node_t *after = nullptr;
+    bool first = false;
+};
+
 // RBI-shaped source (for addTemplate) for the methods of the `scope`, `enum` and `store_accessor` calls in a model's
-// code, its associations and its attributes (ModelMacros.cc), and the macros it couldn't read.
+// code, its associations, its attributes and its Shrine attachments (ModelMacros.cc), and the macros it couldn't read.
 std::string modelMacros(const App &app, const Model &model, const Inflector &inflector, const Table &table,
-                        const std::optional<std::string> &primaryKey, std::vector<MacroProblem> &problems);
+                        const std::optional<std::string> &primaryKey, std::vector<MacroProblem> &problems,
+                        std::vector<AttachmentInclude> &attachmentIncludes);
 
 // Shrine (Uploaders.cc). The attachment methods a plugin defines (`activerecord` brings `model`'s and `entity`'s).
 namespace ShrineAttachment {
