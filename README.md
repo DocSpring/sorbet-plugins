@@ -103,3 +103,7 @@ ruby test/run_tests.rb ../sorbet/bazel-bin/main/sorbet
 It also runs a generator's own tests (`<plugin>/generator/test/*_test.rb`, Minitest), for the parts that don't need
 an app, and `test/language_server_test.rb`, which edits files of the `rails` plugin's `jobs` app in Sorbet's language
 server and checks that every file keeps its types on the fast path, the slow path and a preempted slow path.
+
+## License
+
+Apache License 2.0, the same as Sorbet: see [LICENSE](LICENSE).
